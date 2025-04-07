@@ -7,6 +7,7 @@ import numpy as np
 from scipy import stats
 import os
 
+
 def run_pipeline_analysis(cluster_file):
     """Run the recommendation pipeline analysis for a given cluster file."""
     # Load data
@@ -25,10 +26,7 @@ def run_pipeline_analysis(cluster_file):
     df['impression_time'] = df['impression_time'].astype(np.int64) // 10**9
 
     proc = DataFramePreprocessor(
-        item_ix='article_id',
-        user_ix='user_id',
-        timestamp_ix='impression_time'
-    )
+        item_ix='article_id', user_ix='user_id', timestamp_ix='impression_time')
     proc.add_filter(MinUsersPerItem(
         5, item_ix='article_id', user_ix='user_id'))
     proc.add_filter(MinItemsPerUser(
@@ -55,11 +53,10 @@ def run_pipeline_analysis(cluster_file):
     builder.set_data_from_scenario(scenario)
 
     builder.add_algorithm('Popularity')
-    builder.add_algorithm('TARSItemKNN', grid={
-        'K': [50, 100, 200],
-        'fit_decay': [0.01, 0.05],
-        'predict_decay': [0.01, 0.05],
-        'decay_function': ['exponential']
+    builder.add_algorithm('EASE', grid={
+        'l2': [0.01, 0.1, 0.5],
+        'alpha': [0.1, 0.5, 1.0],
+        'density': [0.01, 0.05, 0.1]
     })
     builder.add_algorithm('ItemKNN', grid={
         'K': [50, 100, 200],
@@ -162,10 +159,15 @@ def perform_statistical_analysis(all_metrics):
 
 
 def main():
+    # Setup
+    folder = 'datasets/ekstra/large/0407'
+    print(f"Processing {folder}")
+
     # Process all clusters
     all_metrics = {}
-    for i in range(0, 6):
-        cluster_file = f'datasets/ekstra/clusters/random/cluster_{i}_behaviors.csv'
+    for i in range(0, 4):
+        cluster_file = f'{folder}/cluster_{i}_merged.csv'
+        print(f"Processing {cluster_file}")
         if os.path.exists(cluster_file):
             metrics = run_pipeline_analysis(cluster_file)
             all_metrics[f'cluster_{i}'] = metrics
@@ -174,7 +176,8 @@ def main():
     statistical_results = perform_statistical_analysis(all_metrics)
 
     # Write results to file
-    output_file = 'datasets/ekstra/clusters/results.txt'
+    output_file = f'{folder}/recpack_results.txt'
+    os.makedirs(os.path.dirname(output_file), exist_ok=True)
     with open(output_file, 'w') as f:
         f.write("=== Detailed Results ===\n\n")
         for cluster, metrics in all_metrics.items():
