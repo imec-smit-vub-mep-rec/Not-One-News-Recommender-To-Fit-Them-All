@@ -1,0 +1,7 @@
+pandas>=2.0.0
+numpy
+scikit-learn
+matplotlib
+seaborn
+kneed
+pyarrow>=14.0.1 
