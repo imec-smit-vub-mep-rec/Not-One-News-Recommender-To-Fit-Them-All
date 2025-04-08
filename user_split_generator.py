@@ -33,7 +33,7 @@ def load_data(behaviors_path, articles_path):
 
     # Split behaviors into those with and without article_id
     behaviors_with_article = behaviors_df[behaviors_df['article_id'].notna()]
-    behaviors_without_article = behaviors_df[behaviors_df['article_id'].isna()]
+    # behaviors_without_article = behaviors_df[behaviors_df['article_id'].isna()]
 
     # Merge behaviors with articles to get topic information only for rows with article_id
     merged_with_articles = behaviors_with_article.merge(
@@ -43,8 +43,7 @@ def load_data(behaviors_path, articles_path):
     )
 
     # Combine the merged data with the behaviors without article_id
-    merged_df = pd.concat(
-        [merged_with_articles, behaviors_without_article], ignore_index=True)
+    merged_df = merged_with_articles
 
     # Print first 5 rows of merged_df
     print("Sample of merged data:")
@@ -81,6 +80,7 @@ def load_data(behaviors_path, articles_path):
 def split_dataframe(df, output_dir, split_percentages, random_state=42):
     """
     Split the dataframe into multiple parts with specified percentages and save as separate CSV files.
+    Ensures all data from the same user stays together in the same split.
 
     Parameters:
     -----------
@@ -101,8 +101,14 @@ def split_dataframe(df, output_dir, split_percentages, random_state=42):
     # Create output directory if it doesn't exist
     os.makedirs(output_dir, exist_ok=True)
 
-    # Get total number of rows
-    total_rows = len(df)
+    # Group by user_id to ensure all user data stays together
+    user_groups = df.groupby('user_id')
+    unique_users = df['user_id'].unique()
+    total_users = len(unique_users)
+
+    # Shuffle users to ensure random distribution
+    np.random.seed(random_state)
+    shuffled_users = np.random.permutation(unique_users)
 
     # Validate split percentages
     total_percentage = sum(split_percentages)
@@ -114,36 +120,20 @@ def split_dataframe(df, output_dir, split_percentages, random_state=42):
         ratio = 100 / total_percentage
         split_percentages = [pct * ratio for pct in split_percentages]
 
-    # Convert percentages to row counts
-    split_sizes = [int(total_rows * pct / 100) for pct in split_percentages]
+    # Convert percentages to user counts
+    split_sizes = [int(total_users * pct / 100) for pct in split_percentages]
 
     # Handle rounding errors
-    remaining = total_rows - sum(split_sizes)
+    remaining = total_users - sum(split_sizes)
     if remaining > 0:
-        # Add remaining rows to the largest split
+        # Add remaining users to the largest split
         largest_split_idx = split_sizes.index(max(split_sizes))
         split_sizes[largest_split_idx] += remaining
     elif remaining < 0:
-        # Remove excess rows from the largest split
+        # Remove excess users from the largest split
         largest_split_idx = split_sizes.index(max(split_sizes))
         # remaining is negative, so this subtracts
         split_sizes[largest_split_idx] += remaining
-
-    # Ensure all required columns are present in the output
-    required_columns = [
-        'impression_id', 'article_id', 'impression_time', 'read_time',
-        'scroll_percentage', 'device_type', 'article_ids_inview',
-        'article_ids_clicked', 'user_id', 'is_sso_user', 'gender',
-        'postcode', 'age', 'is_subscriber', 'session_id',
-        'next_read_time', 'next_scroll_percentage', 'category_str',
-        'sentiment_score'
-    ]
-
-    # Reorder columns to match the required order
-    # Keep any additional columns that might be in the dataframe
-    all_columns = required_columns + \
-        [col for col in df.columns if col not in required_columns]
-    df = df[all_columns]
 
     # Create splits
     file_paths = []
@@ -152,24 +142,40 @@ def split_dataframe(df, output_dir, split_percentages, random_state=42):
     for i, size in enumerate(split_sizes):
         end_idx = start_idx + size
 
-        # Ensure we don't go beyond the dataframe length
-        if end_idx > total_rows:
-            end_idx = total_rows
+        # Ensure we don't go beyond the user count
+        if end_idx > total_users:
+            end_idx = total_users
 
-        split_df = df.iloc[start_idx:end_idx]
+        # Get the users for this split
+        split_users = shuffled_users[start_idx:end_idx]
+
+        # Get all data for these users
+        split_df = df[df['user_id'].isin(split_users)]
 
         output_file = os.path.join(output_dir, f"split_{i+1}.csv")
         split_df.to_csv(output_file, index=False)
-        print(f"Saved {len(split_df)} rows to {output_file}")
+        print(
+            f"Saved {len(split_df)} rows ({len(split_users)} users) to {output_file}")
         file_paths.append(output_file)
 
         start_idx = end_idx
 
-        # Break if we've reached the end of the dataframe
-        if end_idx >= total_rows:
+        # Break if we've reached the end of the users
+        if end_idx >= total_users:
             break
 
     return file_paths
+
+
+"""
+Example usage:
+python user_split_generator.py \
+  --behaviors datasets/ekstra-large/behaviors.parquet \
+  --articles datasets/ekstra-large/articles.parquet \
+  --output_dir results/data_splits \
+  --split_percentages 70 20 10 \
+  --random_state 42
+"""
 
 
 def main():
