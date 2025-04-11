@@ -1,3 +1,10 @@
+"""
+Function to perform user clustering on a dataset in Ekstra format (behaviors and articles)
+
+Usage:
+python user_clustering.py
+"""
+
 import pandas as pd
 import numpy as np
 from sklearn.preprocessing import StandardScaler
@@ -10,7 +17,8 @@ from typing import List, Dict, Tuple
 import json
 from sklearn.impute import SimpleImputer
 
-result_folder = 'large0407'
+result_folder = 'ekstra/0409-large'
+dataset = 'ekstra-large'
 # Create results directory if it doesn't exist
 os.makedirs(f'results/user_clusters/{result_folder}', exist_ok=True)
 
@@ -18,10 +26,8 @@ os.makedirs(f'results/user_clusters/{result_folder}', exist_ok=True)
 def load_data() -> Tuple[pd.DataFrame, pd.DataFrame]:
     """Load and prepare the datasets."""
     # Load the datasets
-    # 'datasets/ekstra-large/articles.parquet'
-    articles_location = 'datasets/ekstra-large/articles.parquet'
-    # 'datasets/ekstra-large/behaviors.parquet'
-    behaviors_location = 'datasets/ekstra-large/behaviors.parquet'
+    articles_location = f'datasets/{dataset}/articles.parquet'
+    behaviors_location = f'datasets/{dataset}/behaviors.parquet'
     articles_df = pd.read_parquet(articles_location)
     behaviors_df = pd.read_parquet(behaviors_location)
 
@@ -90,23 +96,9 @@ def create_article_table(merged_df: pd.DataFrame, articles_df: pd.DataFrame) -> 
 
     # Save the article table to a csv file
     article_table.to_csv(
-        'results/user_clusters/article_table.csv', index=False)
+        f'results/user_clusters/{result_folder}/article_table.csv', index=False)
 
     return article_table
-
-# Create a csv table per user_id, with the following columns:
-# - user_id
-# - count of sessions (based on behaviors.parquet, by unique session_id)
-# - count of impressions (based on behaviors.parquet, by all impressions (behaviors for which article_id is not null))
-# - count of unique categories (based on behaviors.parquet, by all articles for which article_id is not null)
-# - count of unique articles viewed (based on behaviors.parquet, by all articles for which article_id is not null)
-# - average reading time (based on behaviors.parquet, by all articles for which article_id is not null)
-# - average scroll depth (based on behaviors.parquet, by all articles for which article_id is not null)
-# - average session length (number of articles viewed per session)
-# - average number of categories per session
-# - average session duration (based on behaviors.parquet, by unique session_id)
-# - percentage of sessions in the morning, afternoon, evening and night
-# - subscription status
 
 
 def create_user_table(merged_df: pd.DataFrame) -> pd.DataFrame:
@@ -126,6 +118,9 @@ def create_user_table(merged_df: pd.DataFrame) -> pd.DataFrame:
     """
     # First, get the subscription status for each user (it's the same for all rows of a user)
     subscription_status = merged_df.groupby('user_id')['is_subscriber'].first()
+
+    # Convert Unix timestamp to datetime
+    merged_df['impression_time'] = pd.to_datetime(merged_df['impression_time'], unit='s')
 
     user_table = merged_df.groupby('user_id').agg(
         count_sessions=('session_id', 'nunique'),  # Number of sessions
@@ -174,7 +169,15 @@ def create_user_table(merged_df: pd.DataFrame) -> pd.DataFrame:
     total_reading_time = merged_df.groupby('user_id')['read_time'].sum()
     article_reading_time = merged_df[merged_df['article_id'].notna()].groupby('user_id')[
         'read_time'].sum()
+    homepage_reading_time = merged_df[merged_df['article_id'].isna()].groupby('user_id')[
+        'read_time'].sum()
     proportion_article_time = article_reading_time / total_reading_time
+
+    # Calculate average reading time on homepage in seconds
+    avg_reading_time_homepage = merged_df[merged_df['article_id'].isna()].groupby('user_id')[
+        'read_time'].mean()
+    avg_reading_time_articles = merged_df[merged_df['article_id'].notna()].groupby(
+        'user_id')['read_time'].mean()
 
     # Calculate average category switches per session
     # First, filter for valid categories
@@ -212,6 +215,10 @@ def create_user_table(merged_df: pd.DataFrame) -> pd.DataFrame:
         avg_session_duration)
     user_table['proportion_article_time'] = user_table['user_id'].map(
         proportion_article_time)
+    user_table['avg_reading_time_homepage'] = user_table['user_id'].map(
+        avg_reading_time_homepage)
+    user_table['avg_reading_time_articles'] = user_table['user_id'].map(
+        avg_reading_time_articles)
     user_table['avg_category_switches'] = user_table['user_id'].map(
         avg_switches_per_session)
 
@@ -220,7 +227,8 @@ def create_user_table(merged_df: pd.DataFrame) -> pd.DataFrame:
         subscription_status)
 
     # Save the user table to a csv file
-    user_table.to_csv('results/user_clusters/user_table.csv', index=False)
+    user_table.to_csv(
+        f'results/user_clusters/{result_folder}/user_table.csv', index=False)
 
     return user_table
 
@@ -253,9 +261,15 @@ def prepare_clustering_data(user_table: pd.DataFrame) -> Tuple[pd.DataFrame, Sta
     # Create feature matrix
     X = user_table[features].copy()
 
-    # Handle missing values
+    # Handle missing values - fill with 0 for these specific columns
+    X['avg_categories_per_session'] = X['avg_categories_per_session'].fillna(0)
+    X['avg_category_switches'] = X['avg_category_switches'].fillna(0)
+    X['proportion_article_time'] = X['proportion_article_time'].fillna(0)
+
+    # Handle remaining missing values with mean imputation
     imputer = SimpleImputer(strategy='mean')
-    X = pd.DataFrame(imputer.fit_transform(X), columns=X.columns)
+    X_imputed = imputer.fit_transform(X)
+    X = pd.DataFrame(X_imputed, columns=X.columns)
 
     # Scale features
     scaler = StandardScaler()
@@ -283,7 +297,7 @@ def find_optimal_clusters(X: pd.DataFrame, max_clusters: int = 10) -> int:
     plt.xlabel('k')
     plt.ylabel('Distortion')
     plt.title('Elbow Method For Optimal k')
-    plt.savefig('results/user_clusters/elbow_plot.png')
+    plt.savefig(f'results/user_clusters/{result_folder}/elbow_plot.png')
     plt.close()
 
     # Find elbow point using kneed library
@@ -352,7 +366,13 @@ def create_cluster_summary(user_table: pd.DataFrame, merged_df: pd.DataFrame) ->
         'proportion_article_time': 'mean',
         'avg_session_length': 'mean',
         'count_total_unique_categories': 'mean',
-        'avg_session_duration': 'mean'
+        'avg_session_duration': 'mean',
+        'avg_reading_time_homepage': 'mean',
+        'avg_reading_time_articles': 'mean',
+        'percentage_morning': 'mean',
+        'percentage_evening': 'mean',
+        'percentage_afternoon': 'mean',
+        'percentage_night': 'mean'
     }).round(2)
 
     # Calculate category switches
@@ -368,15 +388,21 @@ def create_cluster_summary(user_table: pd.DataFrame, merged_df: pd.DataFrame) ->
         'Percentage of Users': cluster_percentages,
         'Avg Reading Time (s)': cluster_metrics['avg_reading_time'],
         'Proportion of Time on Articles': cluster_metrics['proportion_article_time'],
-        'Avg Reading Time Homepage (s)': cluster_metrics['proportion_article_time'],
+        'Avg Reading Time Homepage (s)': cluster_metrics['avg_reading_time_homepage'],
+        'Avg Reading Time Articles (s)': cluster_metrics['avg_reading_time_articles'],
         'Avg Articles per Session': cluster_metrics['avg_session_length'],
         'Avg Categories Read': cluster_metrics['count_total_unique_categories'],
         'Avg Session Duration (s)': cluster_metrics['avg_session_duration'],
-        'Avg Category Switches per Session': avg_switches_per_cluster
+        'Avg Category Switches per Session': avg_switches_per_cluster,
+        'Avg Reading Time Morning (%)': cluster_metrics['percentage_morning'],
+        'Avg Reading Time Evening (%)': cluster_metrics['percentage_evening'],
+        'Avg Reading Time Afternoon (%)': cluster_metrics['percentage_afternoon'],
+        'Avg Reading Time Night (%)': cluster_metrics['percentage_night'],
     })
 
     # Save summary to CSV
-    summary_df.to_csv('results/user_clusters/cluster_summary.csv')
+    summary_df.to_csv(
+        f'results/user_clusters/{result_folder}/cluster_summary.csv')
 
     # Create a stacked bar plot for cluster sizes with subscription status
     plt.figure(figsize=(12, 6))
@@ -408,7 +434,7 @@ def create_cluster_summary(user_table: pd.DataFrame, merged_df: pd.DataFrame) ->
                      color='black' if j == 0 else 'white')
 
     plt.tight_layout()
-    plt.savefig('results/user_clusters/cluster_sizes.png')
+    plt.savefig(f'results/user_clusters/{result_folder}/cluster_sizes.png')
     plt.close()
 
     # Create a comparison plot for key metrics
@@ -463,14 +489,16 @@ def create_cluster_summary(user_table: pd.DataFrame, merged_df: pd.DataFrame) ->
     axes[1, 3].set_visible(False)
 
     plt.tight_layout()
-    plt.savefig('results/user_clusters/cluster_metrics_comparison.png')
+    plt.savefig(
+        f'results/user_clusters/{result_folder}/cluster_metrics_comparison.png')
     plt.close()
 
     # Print summary to console
     print("\nCluster Summary:")
     print("=" * 80)
     print(summary_df.to_string())
-    print("\nDetailed metrics saved to 'results/user_clusters/cluster_summary.csv'")
+    print(
+        f"\nDetailed metrics saved to 'results/user_clusters/{result_folder}/cluster_summary.csv'")
 
 
 def analyze_category_popularity(merged_df: pd.DataFrame, user_table: pd.DataFrame) -> None:
@@ -520,12 +548,13 @@ def analyze_category_popularity(merged_df: pd.DataFrame, user_table: pd.DataFram
     plt.xlabel('Category')
     plt.ylabel('Cluster')
     plt.tight_layout()
-    plt.savefig('results/user_clusters/category_popularity_heatmap.png')
+    plt.savefig(
+        f'results/user_clusters/{result_folder}/category_popularity_heatmap.png')
     plt.close()
 
     # Save detailed category popularity data
     category_popularity.to_csv(
-        'results/user_clusters/category_popularity.csv', index=False)
+        f'results/user_clusters/{result_folder}/category_popularity.csv', index=False)
 
     # Print top categories for each cluster
     print("\nTop Categories per Cluster:")
@@ -546,7 +575,8 @@ def create_cluster_files(merged_df: pd.DataFrame, user_table: pd.DataFrame) -> N
     2. A summary text file with key statistics (cluster_{index}_summary.txt)
     """
     # Create directory if it doesn't exist
-    os.makedirs('results/user_clusters/large0407/cluster_data', exist_ok=True)
+    os.makedirs(
+        f'results/user_clusters/{result_folder}/cluster_data', exist_ok=True)
 
     total_users = len(user_table['user_id'].unique())
 
@@ -561,7 +591,7 @@ def create_cluster_files(merged_df: pd.DataFrame, user_table: pd.DataFrame) -> N
 
         # Save merged data for this cluster
         cluster_df.to_csv(
-            f'results/user_clusters/large0407/cluster_data/cluster_{cluster_id}_merged.csv', index=False)
+            f'results/user_clusters/{result_folder}/cluster_data/cluster_{cluster_id}_merged.csv', index=False)
 
         # Calculate summary statistics
         num_users = len(cluster_users)
@@ -635,22 +665,14 @@ def analyze_clusters(X_with_clusters: pd.DataFrame, user_table: pd.DataFrame, me
     # Calculate cluster sizes
     cluster_sizes = user_table['cluster'].value_counts().sort_index()
 
-    # Calculate mean values for each feature by cluster
-    cluster_means = user_table.groupby('cluster').mean()
-
-    # Drop user_id column if it exists
-    if 'user_id' in cluster_means.columns:
-        cluster_means = cluster_means.drop('user_id', axis=1)
-
-    # Normalize each column to be between 0 and 1
-    cluster_means_normalized = (
-        cluster_means - cluster_means.min()) / (cluster_means.max() - cluster_means.min())
+    # Calculate mean values for each feature by cluster, excluding user_id
+    numeric_columns = user_table.select_dtypes(include=[np.number]).columns
+    cluster_means = user_table[numeric_columns].groupby('cluster').mean()
 
     # Create heatmap of feature means by cluster
     plt.figure(figsize=(15, 10))
-    sns.heatmap(cluster_means_normalized,
-                annot=cluster_means, fmt='.2f', cmap='YlOrRd')
-    plt.title('Feature Means by Cluster (Colors Normalized per Column)')
+    sns.heatmap(cluster_means, annot=True, fmt='.2f', cmap='YlOrRd')
+    plt.title('Feature Means by Cluster')
     plt.tight_layout()
     plt.savefig(f'results/user_clusters/{result_folder}/cluster_heatmap.png')
     plt.close()

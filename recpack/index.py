@@ -160,13 +160,13 @@ def perform_statistical_analysis(all_metrics):
 
 def main():
     # Setup
-    folder = 'datasets/ekstra/large/0407'
+    folder = 'datasets/ekstra/large/random'
     print(f"Processing {folder}")
 
     # Process all clusters
     all_metrics = {}
     for i in range(0, 4):
-        cluster_file = f'{folder}/cluster_{i}_merged.csv'
+        cluster_file = f'{folder}/split_{i}.csv'
         print(f"Processing {cluster_file}")
         if os.path.exists(cluster_file):
             metrics = run_pipeline_analysis(cluster_file)

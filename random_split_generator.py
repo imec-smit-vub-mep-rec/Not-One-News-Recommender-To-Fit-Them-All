@@ -1,3 +1,19 @@
+"""
+Function to split the data into multiple parts with specified percentages and save as separate CSV files.
+Ensures all data from the same user stays together in the same split.
+
+Usage:
+python user_split_generator.py \
+  --behaviors datasets/ekstra-large/behaviors.parquet \
+  --articles datasets/ekstra-large/articles.parquet \
+  --output_dir results/data_splits \
+  --split_percentages 70 20 10 \
+  --random_state 42
+
+
+  
+"""
+
 import pandas as pd
 import numpy as np
 import os

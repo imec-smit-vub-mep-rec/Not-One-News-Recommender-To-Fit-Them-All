@@ -1,3 +1,10 @@
+"""
+Function to perform user clustering on a dataset in Ekstra format (behaviors and articles)
+
+Usage:
+python user_clustering.py
+"""
+
 import pandas as pd
 import numpy as np
 from sklearn.preprocessing import StandardScaler
@@ -9,28 +16,61 @@ import os
 from typing import List, Dict, Tuple
 import json
 from sklearn.impute import SimpleImputer
+import time
 
+result_folder = 'addressa-small/results'
+dataset = 'addressa-small'
 # Create results directory if it doesn't exist
-os.makedirs('results/user_clusters', exist_ok=True)
+os.makedirs(f'results/user_clusters/{result_folder}', exist_ok=True)
+
+
+def print_progress(current, total, start_time, prefix='', suffix=''):
+    """Print progress with elapsed time and estimated time remaining."""
+    elapsed = time.time() - start_time
+    progress = current / total
+    if progress > 0:
+        estimated_total = elapsed / progress
+        remaining = estimated_total - elapsed
+        print(f"\r{prefix} {current}/{total} ({progress:.1%}) - Elapsed: {elapsed:.1f}s - Remaining: {remaining:.1f}s {suffix}", end='', flush=True)
+    else:
+        print(f"\r{prefix} {current}/{total} ({progress:.1%}) - Elapsed: {elapsed:.1f}s {suffix}", end='', flush=True)
 
 
 def load_data() -> Tuple[pd.DataFrame, pd.DataFrame]:
     """Load and prepare the datasets."""
     # Load the datasets
-    # 'datasets/ekstra-large/articles.parquet'
-    articles_location = 'addressa/datasets/ekstra_format/articles_addressa.parquet'
-    # 'datasets/ekstra-large/behaviors.parquet'
-    behaviors_location = 'addressa/datasets/ekstra_format/behaviors_addressa.parquet'
+    articles_location = f'datasets/{dataset}/articles.parquet'
+    behaviors_location = f'datasets/{dataset}/behaviors.parquet'
     articles_df = pd.read_parquet(articles_location)
     behaviors_df = pd.read_parquet(behaviors_location)
 
-    # Merge behaviors with articles to get topic information
-    # Only keep rows where article_id is not null
-    merged_df = behaviors_df[behaviors_df['article_id'].notna()].merge(
+    # Print column names of behaviors_df
+    print("Columns in behaviors_df:", behaviors_df.columns.tolist())
+
+    # Split behaviors into those with and without article_id
+    behaviors_with_article = behaviors_df[behaviors_df['article_id'].notna()]
+    behaviors_without_article = behaviors_df[behaviors_df['article_id'].isna()]
+
+    # Remove all behavior rows where the session_id has more than 50 rows (outliers, maybe crawlers or bots)
+    behaviors_with_article = behaviors_with_article[behaviors_with_article.groupby(
+        'session_id').transform('size') <= 50]
+
+    # Merge behaviors with articles to get topic information only for rows with article_id
+    merged_with_articles = behaviors_with_article.merge(
         articles_df[['article_id', 'category_str', 'sentiment_score']],
         on='article_id',
         how='left'
     )
+
+    # Combine the merged data with the behaviors without article_id
+    merged_df = pd.concat(
+        [merged_with_articles, behaviors_without_article], ignore_index=True)
+
+    # Print first 5 rows of merged_df
+    print(merged_df.head())
+
+    # Print column names of merged_df
+    print("Columns in merged_df:", merged_df.columns.tolist())
 
     return merged_df, articles_df
 
@@ -54,14 +94,14 @@ def create_article_table(merged_df: pd.DataFrame, articles_df: pd.DataFrame) -> 
     - count of unique categories (based on behaviors.parquet)
     - count of unique users that accessed this article (based on behaviors.parquet)
     - average reading time (based on behaviors.parquet)
-    - average scroll depth (based on behaviors.parquet)
+    # - average scroll depth (based on behaviors.parquet) - not accurate
     """
     article_table = merged_df.groupby('article_id').agg(
         count_impressions=('impression_id', 'count'),
         count_unique_categories=('category_str', 'nunique'),
         count_unique_users=('user_id', 'nunique'),
         avg_reading_time=('read_time', 'mean'),
-        avg_scroll_depth=('scroll_percentage', 'mean')
+        # avg_scroll_depth=('scroll_percentage', 'mean') - not accurate
     ).reset_index()
 
     # Merge with articles_df to get category_str and sentiment_score
@@ -73,23 +113,9 @@ def create_article_table(merged_df: pd.DataFrame, articles_df: pd.DataFrame) -> 
 
     # Save the article table to a csv file
     article_table.to_csv(
-        'results/user_clusters/article_table.csv', index=False)
+        f'results/user_clusters/{result_folder}/article_table.csv', index=False)
 
     return article_table
-
-# Create a csv table per user_id, with the following columns:
-# - user_id
-# - count of sessions (based on behaviors.parquet, by unique session_id)
-# - count of impressions (based on behaviors.parquet, by all impressions (behaviors for which article_id is not null))
-# - count of unique categories (based on behaviors.parquet, by all articles for which article_id is not null)
-# - count of unique articles viewed (based on behaviors.parquet, by all articles for which article_id is not null)
-# - average reading time (based on behaviors.parquet, by all articles for which article_id is not null)
-# - average scroll depth (based on behaviors.parquet, by all articles for which article_id is not null)
-# - average session length (number of articles viewed per session)
-# - average number of categories per session
-# - average session duration (based on behaviors.parquet, by unique session_id)
-# - percentage of sessions in the morning, afternoon, evening and night
-# - subscription status
 
 
 def create_user_table(merged_df: pd.DataFrame) -> pd.DataFrame:
@@ -107,18 +133,35 @@ def create_user_table(merged_df: pd.DataFrame) -> pd.DataFrame:
     - percentage of sessions in the morning, afternoon, evening and night
     - subscription status
     """
+    start_time = time.time()
+    print("\nCreating user table...")
+
     # First, get the subscription status for each user (it's the same for all rows of a user)
     subscription_status = merged_df.groupby('user_id')['is_subscriber'].first()
 
+    # Convert Unix timestamp to datetime
+    merged_df['impression_time'] = pd.to_datetime(
+        merged_df['impression_time'], unit='ms')
+
+    print("Calculating basic metrics...")
     user_table = merged_df.groupby('user_id').agg(
-        count_sessions=('session_id', 'nunique'),
-        count_impressions=('impression_id', 'count'),
-        count_unique_categories=('category_str', 'nunique'),
-        count_unique_articles=('article_id', 'nunique'),
-        avg_reading_time=('read_time', 'mean'),
-        avg_scroll_depth=('scroll_percentage', 'mean'),
-        avg_session_length=('article_id', 'count'),
-        avg_categories_per_session=('category_str', 'nunique'),
+        count_sessions=('session_id', 'nunique'),  # Number of sessions
+        # Number of total impressions
+        count_total_impressions=('impression_id', 'count'),
+        # Number of impressions on homepage (where article_id is not defined)
+        count_total_homepage_impressions=(
+            'article_id', lambda x: x.isna().sum()),
+        # Number of impressions on articles (where article_id is defined)
+        count_total_article_impressions=(
+            'article_id', lambda x: x.notna().sum()),
+        # Number of unique categories (excluding empty strings)
+        count_total_unique_categories=(
+            'category_str', lambda x: x[(x != '') & (x.notna())].nunique()),
+        # Number of unique articles
+        count_total_unique_articles=('article_id', 'nunique'),
+        avg_reading_time=('read_time', 'mean'),  # Average reading time
+        avg_session_length=('session_id', lambda x: x.groupby(
+            x).size().mean()),  # Average number of articles per session
         percentage_morning=('impression_time', lambda x: (
             (x.dt.hour >= 6) & (x.dt.hour < 12)).mean()),
         percentage_afternoon=('impression_time', lambda x: (
@@ -129,13 +172,94 @@ def create_user_table(merged_df: pd.DataFrame) -> pd.DataFrame:
             (x.dt.hour >= 0) & (x.dt.hour < 6)).mean())
     ).reset_index()
 
-    # Add subscription status to the user table
+    print("\nCalculating category metrics...")
+    # Calculate average categories per session separately, only considering valid categories
+    valid_categories_df = merged_df[(merged_df['category_str'] != '') & (
+        merged_df['category_str'].notna())]
+    session_categories = valid_categories_df.groupby(['user_id', 'session_id'])[
+        'category_str'].nunique()
+    # Only consider sessions that have at least one valid category
+    session_categories = session_categories[session_categories > 0]
+    avg_categories_per_session = session_categories.groupby('user_id').mean()
+
+    print("Calculating session durations...")
+    # Calculate average session duration separately
+    session_durations = merged_df.groupby(['user_id', 'session_id'])['impression_time'].agg(
+        lambda x: (x.max() - x.min()).total_seconds()
+    )
+    avg_session_duration = session_durations.groupby('user_id').mean()
+
+    print("Calculating reading time metrics...")
+    # Calculate proportion of time spent on articles vs homepage
+    total_reading_time = merged_df.groupby('user_id')['read_time'].sum()
+    article_reading_time = merged_df[merged_df['article_id'].notna()].groupby('user_id')[
+        'read_time'].sum()
+    homepage_reading_time = merged_df[merged_df['article_id'].isna()].groupby('user_id')[
+        'read_time'].sum()
+    proportion_article_time = article_reading_time / total_reading_time
+
+    # Calculate average reading time on homepage in seconds
+    avg_reading_time_homepage = merged_df[merged_df['article_id'].isna()].groupby('user_id')[
+        'read_time'].mean()
+    avg_reading_time_articles = merged_df[merged_df['article_id'].notna()].groupby(
+        'user_id')['read_time'].mean()
+
+    print("Calculating category switches...")
+    # Calculate average category switches per session
+    # First, filter for valid categories
+    valid_df = merged_df[(merged_df['category_str'] != '')
+                         & (merged_df['category_str'].notna())]
+    # Sort by user_id, session_id, and impression_time
+    sorted_df = valid_df.sort_values(
+        ['user_id', 'session_id', 'impression_time'])
+
+    # Calculate category switches per session
+    category_switches = []
+    total_sessions = len(sorted_df.groupby(['user_id', 'session_id']))
+    current_session = 0
+
+    for (user_id, session_id), group in sorted_df.groupby(['user_id', 'session_id']):
+        current_session += 1
+        print_progress(current_session, total_sessions, start_time,
+                       prefix='Processing sessions:', suffix='')
+
+        # Get categories in order of reading, excluding empty strings
+        categories = group['category_str'][group['category_str'] != ''].values
+        # Count switches (when category changes)
+        switches = sum(1 for i in range(1, len(categories))
+                       if categories[i] != categories[i-1])
+        category_switches.append({
+            'user_id': user_id,
+            'session_id': session_id,
+            'category_switches': switches
+        })
+
+    # Convert to DataFrame and calculate average per user
+    switches_df = pd.DataFrame(category_switches)
+    avg_switches = switches_df.groupby('user_id')['category_switches'].mean()
+
+    print("\nMerging all metrics...")
+    # Add all calculated metrics to the user table
+    user_table['avg_categories_per_session'] = user_table['user_id'].map(
+        avg_categories_per_session)
+    user_table['avg_session_duration'] = user_table['user_id'].map(
+        avg_session_duration)
+    user_table['proportion_article_time'] = user_table['user_id'].map(
+        proportion_article_time)
+    user_table['avg_reading_time_homepage'] = user_table['user_id'].map(
+        avg_reading_time_homepage)
+    user_table['avg_reading_time_articles'] = user_table['user_id'].map(
+        avg_reading_time_articles)
+    user_table['avg_category_switches'] = user_table['user_id'].map(
+        avg_switches)
     user_table['is_subscriber'] = user_table['user_id'].map(
         subscription_status)
 
     # Save the user table to a csv file
-    user_table.to_csv('results/user_clusters/user_table.csv', index=False)
+    user_table.to_csv(
+        f'results/user_clusters/{result_folder}/user_table.csv', index=False)
 
+    print(f"\nUser table created in {time.time() - start_time:.1f} seconds")
     return user_table
 
 # Clustering analysis: can distinct user clusters be identified based on the user tables?
@@ -147,12 +271,17 @@ def prepare_clustering_data(user_table: pd.DataFrame) -> Tuple[pd.DataFrame, Sta
     # Select features for clustering
     features = [
         'count_sessions',
-        'count_impressions',
-        'count_unique_categories',
-        'count_unique_articles',
+        'count_total_impressions',
+        'count_total_homepage_impressions',
+        'count_total_article_impressions',
+        'count_total_unique_categories',
+        'count_total_unique_articles',
         'avg_reading_time',
+        'proportion_article_time',
         'avg_session_length',
         'avg_categories_per_session',
+        'avg_category_switches',
+        'avg_session_duration',
         'percentage_morning',
         'percentage_afternoon',
         'percentage_evening',
@@ -162,9 +291,15 @@ def prepare_clustering_data(user_table: pd.DataFrame) -> Tuple[pd.DataFrame, Sta
     # Create feature matrix
     X = user_table[features].copy()
 
-    # Handle missing values
+    # Handle missing values - fill with 0 for these specific columns
+    X['avg_categories_per_session'] = X['avg_categories_per_session'].fillna(0)
+    X['avg_category_switches'] = X['avg_category_switches'].fillna(0)
+    X['proportion_article_time'] = X['proportion_article_time'].fillna(0)
+
+    # Handle remaining missing values with mean imputation
     imputer = SimpleImputer(strategy='mean')
-    X = pd.DataFrame(imputer.fit_transform(X), columns=X.columns)
+    X_imputed = imputer.fit_transform(X)
+    X = pd.DataFrame(X_imputed, columns=X.columns)
 
     # Scale features
     scaler = StandardScaler()
@@ -192,7 +327,7 @@ def find_optimal_clusters(X: pd.DataFrame, max_clusters: int = 10) -> int:
     plt.xlabel('k')
     plt.ylabel('Distortion')
     plt.title('Elbow Method For Optimal k')
-    plt.savefig('results/user_clusters/elbow_plot.png')
+    plt.savefig(f'results/user_clusters/{result_folder}/elbow_plot.png')
     plt.close()
 
     # Find elbow point using kneed library
@@ -226,8 +361,8 @@ def calculate_category_switches(merged_df: pd.DataFrame) -> pd.Series:
     # Calculate category switches per session
     category_switches = []
     for (user_id, session_id), group in sorted_df.groupby(['user_id', 'session_id']):
-        # Get categories in order of reading
-        categories = group['category_str'].values
+        # Get categories in order of reading, excluding empty strings
+        categories = group['category_str'][group['category_str'] != ''].values
         # Count switches (when category changes)
         switches = sum(1 for i in range(1, len(categories))
                        if categories[i] != categories[i-1])
@@ -252,107 +387,148 @@ def create_cluster_summary(user_table: pd.DataFrame, merged_df: pd.DataFrame) ->
     cluster_percentages = (cluster_sizes / total_users * 100).round(2)
 
     # Calculate subscription status per cluster
-    # Convert is_subscriber to numeric, treating NA as 0 (non-subscriber)
-    user_table['is_subscriber'] = user_table['is_subscriber'].fillna(0).astype(int)
-    subscription_counts = user_table.groupby(['cluster', 'is_subscriber']).size().unstack(fill_value=0)
-    subscription_percentages = (subscription_counts.div(subscription_counts.sum(axis=1), axis=0) * 100).round(2)
+    subscription_counts = user_table.groupby(
+        ['cluster', 'is_subscriber']).size().unstack(fill_value=0)
 
     # Calculate metrics per cluster
     cluster_metrics = user_table.groupby('cluster').agg({
         'avg_reading_time': 'mean',
+        'proportion_article_time': 'mean',
         'avg_session_length': 'mean',
-        'count_unique_categories': 'mean'
+        'count_total_unique_categories': 'mean',
+        'avg_session_duration': 'mean',
+        'avg_reading_time_homepage': 'mean',
+        'avg_reading_time_articles': 'mean',
+        'percentage_morning': 'mean',
+        'percentage_evening': 'mean',
+        'percentage_afternoon': 'mean',
+        'percentage_night': 'mean'
     }).round(2)
 
     # Calculate category switches
     category_switches = calculate_category_switches(merged_df)
-    user_table['avg_category_switches'] = user_table['user_id'].map(category_switches)
-    avg_switches_per_cluster = user_table.groupby('cluster')['avg_category_switches'].mean().round(2)
+    user_table['avg_category_switches'] = user_table['user_id'].map(
+        category_switches)
+    avg_switches_per_cluster = user_table.groupby(
+        'cluster')['avg_category_switches'].mean().round(2)
 
     # Create a summary DataFrame
     summary_df = pd.DataFrame({
         'Number of Users': cluster_sizes,
         'Percentage of Users': cluster_percentages,
         'Avg Reading Time (s)': cluster_metrics['avg_reading_time'],
+        'Proportion of Time on Articles': cluster_metrics['proportion_article_time'],
+        'Avg Reading Time Homepage (s)': cluster_metrics['avg_reading_time_homepage'],
+        'Avg Reading Time Articles (s)': cluster_metrics['avg_reading_time_articles'],
         'Avg Articles per Session': cluster_metrics['avg_session_length'],
-        'Avg Categories Read': cluster_metrics['count_unique_categories'],
-        'Avg Category Switches per Session': avg_switches_per_cluster
+        'Avg Categories Read': cluster_metrics['count_total_unique_categories'],
+        'Avg Session Duration (s)': cluster_metrics['avg_session_duration'],
+        'Avg Category Switches per Session': avg_switches_per_cluster,
+        'Avg Reading Time Morning (%)': cluster_metrics['percentage_morning'],
+        'Avg Reading Time Evening (%)': cluster_metrics['percentage_evening'],
+        'Avg Reading Time Afternoon (%)': cluster_metrics['percentage_afternoon'],
+        'Avg Reading Time Night (%)': cluster_metrics['percentage_night'],
     })
 
     # Save summary to CSV
-    summary_df.to_csv('results/user_clusters/cluster_summary.csv')
+    summary_df.to_csv(
+        f'results/user_clusters/{result_folder}/cluster_summary.csv')
 
     # Create a stacked bar plot for cluster sizes with subscription status
     plt.figure(figsize=(12, 6))
-    
-    # Plot the stacked bars manually
-    bottom = np.zeros(len(cluster_sizes))
-    colors = ['#FFD700', '#2E8B57']  # Yellow for non-subscribers, Green for subscribers
-    
-    for i, col in enumerate(subscription_counts.columns):
-        values = subscription_counts[col].values
-        plt.bar(range(len(cluster_sizes)), values, bottom=bottom,
-                label='Subscribers' if col == 1 else 'Non-subscribers',
-                color=colors[i])
-        bottom += values
 
-    plt.title('Subscription Status by Cluster')
+    # Plot stacked bars
+    bottom = np.zeros(len(cluster_sizes))
+    # Yellow for non-subscribers, Green for subscribers
+    colors = ['#FFD700', '#2E8B57']
+
+    for i, (is_subscriber, counts) in enumerate(subscription_counts.items()):
+        plt.bar(summary_df.index, counts, bottom=bottom,
+                label='Subscribers' if is_subscriber else 'Non-subscribers',
+                color=colors[i])
+        bottom += counts
+
+    plt.title('Cluster Sizes by Subscription Status')
     plt.xlabel('Cluster')
     plt.ylabel('Number of Users')
     plt.legend()
-    plt.xticks(range(len(cluster_sizes)), cluster_sizes.index)
 
-    # Add percentage labels
+    # Add percentage labels on top of bars
     for i in range(len(cluster_sizes)):
         total = subscription_counts.iloc[i].sum()
-        bottom_pos = 0
         for j, count in enumerate(subscription_counts.iloc[i]):
             percentage = (count / total * 100).round(1)
-            plt.text(i, bottom_pos + count/2, f'{percentage}%',
+            plt.text(i, bottom[i] - count/2,
+                     f'{percentage}%',
                      ha='center', va='center',
                      color='black' if j == 0 else 'white')
-            bottom_pos += count
 
     plt.tight_layout()
-    plt.savefig('results/user_clusters/cluster_sizes.png')
+    plt.savefig(f'results/user_clusters/{result_folder}/cluster_sizes.png')
     plt.close()
 
     # Create a comparison plot for key metrics
-    fig, axes = plt.subplots(1, 4, figsize=(20, 5))
+    fig, axes = plt.subplots(2, 4, figsize=(20, 10))
 
     # Reading time
-    axes[0].bar(summary_df.index, summary_df['Avg Reading Time (s)'])
-    axes[0].set_title('Average Reading Time')
-    axes[0].set_xlabel('Cluster')
-    axes[0].set_ylabel('Seconds')
+    axes[0, 0].bar(summary_df.index, summary_df['Avg Reading Time (s)'])
+    axes[0, 0].set_title('Average Reading Time')
+    axes[0, 0].set_xlabel('Cluster')
+    axes[0, 0].set_ylabel('Seconds')
+
+    # Reading time homepage
+    axes[0, 1].bar(summary_df.index,
+                   summary_df['Avg Reading Time Homepage (s)'])
+    axes[0, 1].set_title('Average Reading Time on Homepage')
+    axes[0, 1].set_xlabel('Cluster')
+    axes[0, 1].set_ylabel('Seconds')
+
+    # Proportion of time on articles
+    axes[0, 2].bar(summary_df.index,
+                   summary_df['Proportion of Time on Articles'])
+    axes[0, 2].set_title('Proportion of Time on Articles')
+    axes[0, 2].set_xlabel('Cluster')
+    axes[0, 2].set_ylabel('Proportion')
+
+    # Session duration
+    axes[0, 3].bar(summary_df.index, summary_df['Avg Session Duration (s)'])
+    axes[0, 3].set_title('Average Session Duration')
+    axes[0, 3].set_xlabel('Cluster')
+    axes[0, 3].set_ylabel('Seconds')
 
     # Articles per session
-    axes[1].bar(summary_df.index, summary_df['Avg Articles per Session'])
-    axes[1].set_title('Average Articles per Session')
-    axes[1].set_xlabel('Cluster')
-    axes[1].set_ylabel('Number of Articles')
+    axes[1, 0].bar(summary_df.index, summary_df['Avg Articles per Session'])
+    axes[1, 0].set_title('Average Articles per Session')
+    axes[1, 0].set_xlabel('Cluster')
+    axes[1, 0].set_ylabel('Number of Articles')
 
     # Categories read
-    axes[2].bar(summary_df.index, summary_df['Avg Categories Read'])
-    axes[2].set_title('Average Categories Read')
-    axes[2].set_xlabel('Cluster')
-    axes[2].set_ylabel('Number of Categories')
+    axes[1, 1].bar(summary_df.index, summary_df['Avg Categories Read'])
+    axes[1, 1].set_title('Average Categories Read')
+    axes[1, 1].set_xlabel('Cluster')
+    axes[1, 1].set_ylabel('Number of Categories')
 
     # Category switches
-    axes[3].bar(summary_df.index, summary_df['Avg Category Switches per Session'])
-    axes[3].set_title('Average Category Switches per Session')
-    axes[3].set_xlabel('Cluster')
-    axes[3].set_ylabel('Number of Switches')
+    axes[1, 2].bar(summary_df.index,
+                   summary_df['Avg Category Switches per Session'])
+    axes[1, 2].set_title('Average Category Switches per Session')
+    axes[1, 2].set_xlabel('Cluster')
+    axes[1, 2].set_ylabel('Number of Switches')
+
+    # Hide the last subplot
+    axes[1, 3].set_visible(False)
 
     plt.tight_layout()
-    plt.savefig('results/user_clusters/cluster_metrics_comparison.png')
+    plt.savefig(
+        f'results/user_clusters/{result_folder}/cluster_metrics_comparison.png')
     plt.close()
 
     # Print summary to console
     print("\nCluster Summary:")
     print("=" * 80)
     print(summary_df.to_string())
-    print("\nDetailed metrics saved to 'results/user_clusters/cluster_summary.csv'")
+    print(
+        f"\nDetailed metrics saved to 'results/user_clusters/{result_folder}/cluster_summary.csv'")
 
 
 def analyze_category_popularity(merged_df: pd.DataFrame, user_table: pd.DataFrame) -> None:
@@ -363,6 +539,9 @@ def analyze_category_popularity(merged_df: pd.DataFrame, user_table: pd.DataFram
         on='user_id',
         how='left'
     )
+
+    # Filter out empty category strings
+    merged_with_clusters = merged_with_clusters[merged_with_clusters['category_str'] != '']
 
     # Calculate category counts per cluster
     category_counts = merged_with_clusters.groupby(
@@ -399,12 +578,13 @@ def analyze_category_popularity(merged_df: pd.DataFrame, user_table: pd.DataFram
     plt.xlabel('Category')
     plt.ylabel('Cluster')
     plt.tight_layout()
-    plt.savefig('results/user_clusters/category_popularity_heatmap.png')
+    plt.savefig(
+        f'results/user_clusters/{result_folder}/category_popularity_heatmap.png')
     plt.close()
 
     # Save detailed category popularity data
     category_popularity.to_csv(
-        'results/user_clusters/category_popularity.csv', index=False)
+        f'results/user_clusters/{result_folder}/category_popularity.csv', index=False)
 
     # Print top categories for each cluster
     print("\nTop Categories per Cluster:")
@@ -417,6 +597,96 @@ def analyze_category_popularity(merged_df: pd.DataFrame, user_table: pd.DataFram
             print(f"  {row['category_str']}: {row['percentage']:.1f}%")
 
 
+def create_cluster_files(merged_df: pd.DataFrame, user_table: pd.DataFrame) -> None:
+    """Create separate files for each cluster's data and summary statistics.
+
+    For each cluster, creates:
+    1. A CSV file with all merged data for that cluster (cluster_{index}_merged.csv)
+    2. A summary text file with key statistics (cluster_{index}_summary.txt)
+    """
+    # Create directory if it doesn't exist
+    os.makedirs(
+        f'results/user_clusters/{result_folder}/cluster_data', exist_ok=True)
+
+    total_users = len(user_table['user_id'].unique())
+
+    # Process each cluster
+    for cluster_id in sorted(user_table['cluster'].unique()):
+        # Get users in this cluster
+        cluster_users = user_table[user_table['cluster'] == cluster_id]
+
+        # Get all behaviors for users in this cluster
+        cluster_df = merged_df[merged_df['user_id'].isin(
+            cluster_users['user_id'])]
+
+        # Save merged data for this cluster
+        cluster_df.to_csv(
+            f'results/user_clusters/{result_folder}/cluster_data/cluster_{cluster_id}_merged.csv', index=False)
+
+        # Calculate summary statistics
+        num_users = len(cluster_users)
+        pct_users = (num_users / total_users) * 100
+        avg_reading_time = cluster_users['avg_reading_time'].mean()
+        avg_articles_per_session = cluster_users['avg_session_length'].mean()
+        avg_categories = cluster_users['count_total_unique_categories'].mean()
+        avg_category_switches = cluster_users['avg_category_switches'].mean()
+
+        avg_articles_per_user = cluster_users['count_total_article_impressions'].mean(
+        )
+        total_reading_time = cluster_df['read_time'].sum()
+        avg_total_reading_time = total_reading_time / num_users
+
+        # Calculate top categories
+        valid_categories = cluster_df[cluster_df['category_str'] != '']
+        category_counts = valid_categories.groupby('category_str').size()
+        category_percentages = (
+            category_counts / len(valid_categories) * 100).round(2)
+        top_categories = category_percentages.nlargest(5)
+
+        # Create summary text file
+        with open(f'results/user_clusters/{result_folder}/cluster_data/cluster_{cluster_id}_summary.txt', 'w') as f:
+            f.write(f"Cluster {cluster_id} Summary\n")
+            f.write("=" * 20 + "\n\n")
+
+            f.write("General Statistics:\n")
+            f.write(f"- Number of users: {num_users:.1f}\n")
+            f.write(f"- Percentage of total users: {pct_users:.2f}%\n")
+            f.write(
+                f"- Average reading time: {avg_reading_time:.2f} seconds\n")
+            f.write(
+                f"- Average articles per session: {avg_articles_per_session:.2f}\n")
+            f.write(f"- Average categories read: {avg_categories:.2f}\n")
+            f.write(
+                f"- Average category switches per session: {avg_category_switches:.2f}\n\n")
+
+            f.write("Additional Metrics:\n")
+            f.write(
+                f"- Average articles per user: {avg_articles_per_user:.2f}\n")
+            f.write(
+                f"- Total reading time for cluster: {total_reading_time:.2f} seconds\n")
+            f.write(
+                f"- Average total reading time per user: {avg_total_reading_time:.2f} seconds\n\n")
+
+            f.write("Top 5 Categories:\n")
+            for category, percentage in top_categories.items():
+                f.write(f"- {category}: {percentage:.2f}%\n")
+
+    # Create a combined results file
+    with open(f'results/user_clusters/{result_folder}/results.txt', 'w') as f:
+        f.write("Clustering Results Summary\n")
+        f.write("=" * 25 + "\n\n")
+        f.write(f"Total number of users: {total_users}\n")
+        f.write(
+            f"Number of clusters: {len(user_table['cluster'].unique())}\n\n")
+
+        for cluster_id in sorted(user_table['cluster'].unique()):
+            cluster_users = user_table[user_table['cluster'] == cluster_id]
+            num_users = len(cluster_users)
+            pct_users = (num_users / total_users) * 100
+            f.write(
+                f"Cluster {cluster_id}: {num_users} users ({pct_users:.2f}%)\n")
+
+
 def analyze_clusters(X_with_clusters: pd.DataFrame, user_table: pd.DataFrame, merged_df: pd.DataFrame) -> None:
     """Analyze and visualize cluster characteristics."""
     # Add cluster labels to user table
@@ -425,19 +695,26 @@ def analyze_clusters(X_with_clusters: pd.DataFrame, user_table: pd.DataFrame, me
     # Calculate cluster sizes
     cluster_sizes = user_table['cluster'].value_counts().sort_index()
 
-    # Calculate mean values for each numeric feature by cluster
-    numeric_columns = user_table.select_dtypes(include=['int64', 'float64']).columns
-    cluster_means = user_table.groupby('cluster')[numeric_columns].mean()
+    # Calculate mean values for each feature by cluster, excluding user_id
+    numeric_columns = user_table.select_dtypes(include=[np.number]).columns
+    cluster_means = user_table[numeric_columns].groupby('cluster').mean()
 
-    # Fill NA values with 0 and convert to float
-    cluster_means = cluster_means.fillna(0).astype(float)
+    # Create heatmap of feature means by cluster
+    plt.figure(figsize=(15, 10))
+    sns.heatmap(cluster_means, annot=True, fmt='.2f', cmap='YlOrRd')
+    plt.title('Feature Means by Cluster')
+    plt.tight_layout()
+    plt.savefig(f'results/user_clusters/{result_folder}/cluster_heatmap.png')
+    plt.close()
 
     # Create radar plot for cluster characteristics
     features_for_radar = [
         'count_sessions',
-        'count_unique_categories',
+        'avg_category_switches',
         'avg_reading_time',
+        'proportion_article_time',
         'avg_session_length',
+        'avg_session_duration',
         'percentage_morning',
         'percentage_afternoon',
         'percentage_evening',
@@ -446,7 +723,8 @@ def analyze_clusters(X_with_clusters: pd.DataFrame, user_table: pd.DataFrame, me
 
     # Normalize features for radar plot
     radar_data = cluster_means[features_for_radar].copy()
-    radar_data = (radar_data - radar_data.min()) / (radar_data.max() - radar_data.min())
+    radar_data = (radar_data - radar_data.min()) / \
+        (radar_data.max() - radar_data.min())
 
     # Create radar plot
     angles = np.linspace(0, 2*np.pi, len(features_for_radar), endpoint=False)
@@ -466,7 +744,7 @@ def analyze_clusters(X_with_clusters: pd.DataFrame, user_table: pd.DataFrame, me
     plt.title('Cluster Characteristics (Radar Plot)')
     plt.legend(loc='upper right', bbox_to_anchor=(0.1, 0.1))
     plt.tight_layout()
-    plt.savefig('results/user_clusters/cluster_radar.png')
+    plt.savefig(f'results/user_clusters/{result_folder}/cluster_radar.png')
     plt.close()
 
     # Save cluster analysis results
@@ -477,11 +755,14 @@ def analyze_clusters(X_with_clusters: pd.DataFrame, user_table: pd.DataFrame, me
                                        np.abs(X_with_clusters.corr()['cluster']).sort_values(ascending=False)))
     }
 
-    with open('results/user_clusters/cluster_analysis.json', 'w') as f:
+    with open(f'results/user_clusters/{result_folder}/cluster_analysis.json', 'w') as f:
         json.dump(results, f, indent=4)
 
     # Create detailed cluster summary
     create_cluster_summary(user_table, merged_df)
+
+    # Create cluster files and summaries
+    create_cluster_files(merged_df, user_table)
 
     # Analyze category popularity
     analyze_category_popularity(merged_df, user_table)
@@ -489,32 +770,46 @@ def analyze_clusters(X_with_clusters: pd.DataFrame, user_table: pd.DataFrame, me
 
 def perform_clustering_analysis(user_table: pd.DataFrame, merged_df: pd.DataFrame) -> None:
     """Main function to perform clustering analysis."""
-    # Print the columns in user_table to debug
-    print("Columns in user_table:", user_table.columns.tolist())
-    
+    start_time = time.time()
+    print("\nStarting clustering analysis...")
+
     # Prepare data
+    print("Preparing data for clustering...")
     X_scaled, scaler = prepare_clustering_data(user_table)
 
     # Find optimal number of clusters
+    print("Finding optimal number of clusters...")
     optimal_k = find_optimal_clusters(X_scaled)
     print(f"Optimal number of clusters: {optimal_k}")
 
     # Perform clustering
+    print("Performing clustering...")
     kmeans, X_with_clusters = perform_clustering(X_scaled, optimal_k)
 
     # Analyze clusters
+    print("Analyzing clusters...")
     analyze_clusters(X_with_clusters, user_table, merged_df)
+
+    print(
+        f"\nClustering analysis completed in {time.time() - start_time:.1f} seconds")
 
 # Main function that loads the data, creates the tables and saves them to csv files
 
 
 def main():
+    start_time = time.time()
+    print("Starting data processing...")
+
+    print("Loading data...")
     merged_df, articles_df = load_data()
-    article_table = create_article_table(merged_df, articles_df)
+
+    print("\nCreating user table...")
     user_table = create_user_table(merged_df)
 
-    # Perform clustering analysis
+    print("\nPerforming clustering analysis...")
     perform_clustering_analysis(user_table, merged_df)
+
+    print(f"\nTotal processing time: {time.time() - start_time:.1f} seconds")
 
 
 if __name__ == "__main__":
