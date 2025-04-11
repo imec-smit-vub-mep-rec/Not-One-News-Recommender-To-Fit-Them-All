@@ -18,8 +18,8 @@ import json
 from sklearn.impute import SimpleImputer
 import time
 
-result_folder = 'addressa-small/results'
-dataset = 'addressa-small'
+result_folder = 'addressa-large/results'
+dataset = 'addressa-large'
 # Create results directory if it doesn't exist
 os.makedirs(f'results/user_clusters/{result_folder}', exist_ok=True)
 

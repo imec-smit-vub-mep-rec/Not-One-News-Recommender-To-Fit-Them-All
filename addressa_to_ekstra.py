@@ -246,17 +246,18 @@ def process_addressa_data(input_dir: str, output_dir: str):
     jsonl_files = glob.glob(os.path.join(input_dir, '*.jsonl'))
     chunk_size = 10000  # Adjust based on available memory
     total_files = len(jsonl_files)
-    
+
     print(f"\nProcessing {total_files} files...")
-    
+
     for file_idx, file_path in enumerate(jsonl_files, 1):
-        print(f"\nProcessing file {file_idx}/{total_files}: {os.path.basename(file_path)}")
-        
+        print(
+            f"\nProcessing file {file_idx}/{total_files}: {os.path.basename(file_path)}")
+
         # Get total lines in file for progress tracking
         with open(file_path, 'r') as f:
             total_lines = sum(1 for _ in f)
         total_chunks = (total_lines + chunk_size - 1) // chunk_size
-        
+
         for chunk_idx, chunk in enumerate(pd.read_json(file_path, lines=True, chunksize=chunk_size), 1):
             # Process each chunk
             chunk['datetime'] = pd.to_datetime(chunk['time'], unit='s')
@@ -338,7 +339,8 @@ def process_addressa_data(input_dir: str, output_dir: str):
                 'impression_id': chunk['eventId'],
                 'article_id': chunk.apply(lambda x: None if x['is_homepage'] else existing_articles.get(x['url'], {}).get('article_id'), axis=1),
                 'user_id': chunk['userId'],
-                'impression_time': chunk['time'] * 1000,  # Convert to milliseconds
+                # Convert to milliseconds
+                'impression_time': chunk['time'] * 1000,
                 'read_time': chunk['activeTime']
             })
 
@@ -399,7 +401,8 @@ def process_addressa_data(input_dir: str, output_dir: str):
 
             # Show progress
             progress = (chunk_idx / total_chunks) * 100
-            print(f"\rProcessing chunk {chunk_idx}/{total_chunks} ({progress:.1f}%)", end='', flush=True)
+            print(
+                f"\rProcessing chunk {chunk_idx}/{total_chunks} ({progress:.1f}%)", end='', flush=True)
 
             # Clean up memory
             del chunk
@@ -481,12 +484,7 @@ def extract_user_data(input_dir: str, output_dir: str, user_id: str):
 
 if __name__ == '__main__':
     # Directory containing Addressa JSONL files
-    input_dir = 'addressa/datasets/small/input'
+    input_dir = 'addressa/datasets/one_week'
     # Directory to save output parquet files
-    output_dir = 'addressa/datasets/small/output'
+    output_dir = 'addressa/datasets/one_week/converted'
     process_addressa_data(input_dir, output_dir)
-
-    # Debug: extract only the rows with a specific userId
-    user_id = 'cx:2rjk60b8a305197f7sfh1f0qs:3vwgx6jxg64dz'
-    output_dir = 'addressa/datasets/small/debug'
-    # extract_user_data(input_dir, output_dir, user_id)
