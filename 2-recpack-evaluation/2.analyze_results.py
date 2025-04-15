@@ -19,6 +19,7 @@ import itertools
 def load_cluster_data(folder):
     """Load all cluster files and create a mapping of user_ids to cluster numbers."""
     user_cluster_map = {}
+    cluster_user_counts = {}  # Track original number of users per cluster
 
     # Process each cluster file
     for file in os.listdir(folder):
@@ -26,17 +27,21 @@ def load_cluster_data(folder):
             cluster_num = int(file.split('_')[1])
             df = pd.read_csv(os.path.join(folder, file), low_memory=False)
 
+            # Count users in this cluster
+            unique_users = df['user_id'].unique()
+            cluster_user_counts[cluster_num] = len(unique_users)
+
             # Map each user to their cluster
-            for user_id in df['user_id'].unique():
+            for user_id in unique_users:
                 user_cluster_map[user_id] = cluster_num
 
-    return user_cluster_map
+    return user_cluster_map, cluster_user_counts
 
 
 def analyze_results(base_folder):
     """Analyze the results for each algorithm and metric across clusters."""
     results_folder = os.path.join(base_folder, 'results')
-    user_cluster_map = load_cluster_data(base_folder)
+    user_cluster_map, original_cluster_sizes = load_cluster_data(base_folder)
 
     if not user_cluster_map:
         print("No cluster data found. Please check the folder path.")
@@ -44,6 +49,11 @@ def analyze_results(base_folder):
 
     print(
         f"Found {len(user_cluster_map)} users across {len(set(user_cluster_map.values()))} clusters")
+
+    # Print original cluster sizes
+    print("\nOriginal cluster sizes (before preprocessing/splitting):")
+    for cluster, count in sorted(original_cluster_sizes.items()):
+        print(f"Cluster {cluster}: {count} users")
 
     # Create output directory for reports
     report_dir = os.path.join(base_folder, 'cluster_reports')
@@ -124,7 +134,8 @@ def analyze_results(base_folder):
 
             # Check if this file has the expected structure
             if 'user_id_ext' not in df.columns or 'score' not in df.columns:
-                print(f"Skipping {file} - missing required columns (user_id_ext or score)")
+                print(
+                    f"Skipping {file} - missing required columns (user_id_ext or score)")
                 continue
 
             # Match user with cluster
@@ -214,7 +225,13 @@ def analyze_results(base_folder):
             std_score = cluster_data['score'].std()
             zero_count = count_zeros(cluster_data['score'])
             zero_prop = proportion_zeros(cluster_data['score'])
-            user_count = len(cluster_data)
+            recpack_user_count = len(cluster_data)  # Users in predictions
+            original_user_count = original_cluster_sizes.get(
+                cluster, 0)  # Original users in cluster
+
+            # Calculate coverage ratio (what % of original users have predictions)
+            coverage_ratio = recpack_user_count / \
+                original_user_count if original_user_count > 0 else 0
 
             cluster_stats.append({
                 'algorithm': algorithm,
@@ -223,7 +240,9 @@ def analyze_results(base_folder):
                 'cluster': cluster,
                 'mean': avg_score,
                 'std': std_score,
-                'count': user_count,
+                'recpack_user_count': recpack_user_count,  # Users in predictions
+                'original_user_count': original_user_count,  # Original cluster size
+                'coverage_ratio': coverage_ratio,  # Proportion of users covered
                 'zeros': zero_count,
                 'zero_proportion': zero_prop
             })
@@ -244,9 +263,11 @@ def analyze_results(base_folder):
                     yerr=cluster_df['std'],
                     fmt='none', color='black', capsize=5)
 
-        # Add annotations for zero values
+        # Add annotations for zero values and user counts
         for i, row in cluster_df.iterrows():
-            ax.annotate(f"Users: {int(row['count'])}\nZeros: {int(row['zeros'])} ({row['zero_proportion']:.2%})",
+            ax.annotate(f"Original: {int(row['original_user_count'])} users\n"
+                        f"In RecPack: {int(row['recpack_user_count'])} ({row['coverage_ratio']:.1%})\n"
+                        f"Zeros: {int(row['zeros'])} ({row['zero_proportion']:.2%})",
                         (row['cluster'], row['mean']),
                         textcoords="offset points",
                         xytext=(0, 10),
@@ -263,6 +284,23 @@ def analyze_results(base_folder):
         plt.savefig(plot_path)
         plt.close()
 
+        # For calculating coverage stats per algorithm/metric
+        coverage_stats = cluster_df.groupby('cluster').agg({
+            'original_user_count': 'first',  # Original number of users in cluster
+            'recpack_user_count': 'sum',     # Number of users with predictions
+        }).reset_index()
+
+        coverage_stats['coverage_ratio'] = coverage_stats['recpack_user_count'] / \
+            coverage_stats['original_user_count']
+
+        # Output coverage statistics
+        print("\nUser coverage statistics:")
+        print(coverage_stats)
+
+        # Save coverage stats
+        coverage_stats.to_csv(os.path.join(
+            report_dir, f'coverage_{algorithm}_{metric}_k{k}.csv'), index=False)
+
         # Create visualizations - Style from script 3 (dual subplot)
         fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 12))
 
@@ -273,12 +311,31 @@ def analyze_results(base_folder):
         ax1.set_ylabel('Average Score')
         ax1.set_xlabel('Cluster')
 
+        # Add annotation to first plot
+        for i, row in cluster_df.iterrows():
+            ax1.annotate(f"Original: {int(row['original_user_count'])}\n"
+                         f"In RecPack: {int(row['recpack_user_count'])} ({row['coverage_ratio']:.1%})",
+                         (i, row['mean']),
+                         textcoords="offset points",
+                         xytext=(0, 5),
+                         ha='center',
+                         fontsize=8)
+
         # Plot 2: Zero Proportion by Cluster
         sns.barplot(x='cluster', y='zero_proportion', data=cluster_df, ax=ax2)
         ax2.set_title(
             f'{algorithm} - {metric} (k={k}): Proportion of Zero Scores by Cluster')
         ax2.set_ylabel('Proportion of Zero Scores')
         ax2.set_xlabel('Cluster')
+
+        # Add annotation to second plot
+        for i, row in cluster_df.iterrows():
+            ax2.annotate(f"Zeros: {int(row['zeros'])} / {int(row['recpack_user_count'])}",
+                         (i, row['zero_proportion']),
+                         textcoords="offset points",
+                         xytext=(0, 5),
+                         ha='center',
+                         fontsize=8)
 
         # Adjust layout and save
         plt.tight_layout()
@@ -416,14 +473,20 @@ def analyze_results(base_folder):
 
     # Generate bundled cluster performance report (averaging across metrics)
     print("\n=== Bundled Cluster Performance (Average Across Metrics) ===")
-    
+
     # Group by algorithm and cluster, averaging across metrics and k values
     bundled_performance = all_performance.groupby(['algorithm', 'cluster']).agg({
         'mean': 'mean',
         'zero_proportion': 'mean',
-        'count': 'sum'
+        'recpack_user_count': 'sum',
+        # Take the first value as it should be the same for all
+        'original_user_count': 'first'
     }).reset_index()
-    
+
+    # Calculate overall coverage ratio
+    bundled_performance['coverage_ratio'] = bundled_performance['recpack_user_count'] / \
+        bundled_performance['original_user_count']
+
     # Create a pivot table with algorithms as columns and clusters as rows
     bundled_pivot = bundled_performance.pivot_table(
         index='cluster',
@@ -431,25 +494,28 @@ def analyze_results(base_folder):
         values='mean',
         aggfunc='mean'
     )
-    
+
     bundled_zero_pivot = bundled_performance.pivot_table(
         index='cluster',
         columns='algorithm',
         values='zero_proportion',
         aggfunc='mean'
     )
-    
+
     print("\nBundled Average Score by Cluster and Algorithm:")
     print(bundled_pivot)
-    
+
     print("\nBundled Zero Proportion by Cluster and Algorithm:")
     print(bundled_zero_pivot)
-    
+
     # Save bundled reports
-    bundled_performance.to_csv(os.path.join(report_dir, 'bundled_cluster_performance.csv'), index=False)
-    bundled_pivot.to_csv(os.path.join(report_dir, 'bundled_avg_score_comparison.csv'))
-    bundled_zero_pivot.to_csv(os.path.join(report_dir, 'bundled_zero_proportion_comparison.csv'))
-    
+    bundled_performance.to_csv(os.path.join(
+        report_dir, 'bundled_cluster_performance.csv'), index=False)
+    bundled_pivot.to_csv(os.path.join(
+        report_dir, 'bundled_avg_score_comparison.csv'))
+    bundled_zero_pivot.to_csv(os.path.join(
+        report_dir, 'bundled_zero_proportion_comparison.csv'))
+
     # Generate bundled visualizations - heatmaps
     plt.figure(figsize=(14, 10))
     sns.heatmap(bundled_pivot, annot=True, cmap="YlGnBu", fmt=".3f")
@@ -457,47 +523,77 @@ def analyze_results(base_folder):
     plt.tight_layout()
     plt.savefig(os.path.join(report_dir, 'bundled_avg_score_heatmap.png'))
     plt.close()
-    
+
     plt.figure(figsize=(14, 10))
     sns.heatmap(bundled_zero_pivot, annot=True, cmap="YlOrRd", fmt=".3f")
-    plt.title('Bundled Zero Score Proportion by Cluster and Algorithm (Across All Metrics)')
+    plt.title(
+        'Bundled Zero Score Proportion by Cluster and Algorithm (Across All Metrics)')
     plt.tight_layout()
-    plt.savefig(os.path.join(report_dir, 'bundled_zero_proportion_heatmap.png'))
+    plt.savefig(os.path.join(
+        report_dir, 'bundled_zero_proportion_heatmap.png'))
     plt.close()
-    
+
     # Create a bar chart showing average performance per algorithm per cluster
     plt.figure(figsize=(15, 10))
-    
+
     # Get unique clusters and algorithms for consistent ordering
     clusters = sorted(bundled_performance['cluster'].unique())
     algorithms = sorted(bundled_performance['algorithm'].unique())
-    
+
+    # Get average coverage ratio per cluster for title
+    avg_coverage = bundled_performance.groupby(
+        'cluster')['coverage_ratio'].mean()
+
     # Set up the plot
     bar_width = 0.8 / len(algorithms)
     opacity = 0.8
-    
+
     # Plot each algorithm's performance across clusters
     for i, algo in enumerate(algorithms):
         algo_data = bundled_performance[bundled_performance['algorithm'] == algo]
         positions = np.arange(len(clusters)) + (i * bar_width)
-        
+
         # Get values for each cluster (filling with zeros for missing clusters)
         values = []
         for cluster in clusters:
             cluster_value = algo_data[algo_data['cluster'] == cluster]['mean']
-            values.append(cluster_value.iloc[0] if len(cluster_value) > 0 else 0)
-        
+            values.append(cluster_value.iloc[0] if len(
+                cluster_value) > 0 else 0)
+
         plt.bar(positions, values, bar_width, alpha=opacity, label=algo)
-    
-    plt.xlabel('Cluster')
+
+    # Add coverage information to x-tick labels
+    x_tick_labels = []
+    for cluster in clusters:
+        coverage = avg_coverage.get(cluster, 0)
+        x_tick_labels.append(f"{cluster}\n({coverage:.1%} coverage)")
+
+    plt.xlabel('Cluster (with coverage ratio)')
     plt.ylabel('Average Score')
     plt.title('Average Performance by Algorithm Across Clusters (All Metrics)')
-    plt.xticks(np.arange(len(clusters)) + bar_width * (len(algorithms) - 1) / 2, clusters)
+    plt.xticks(np.arange(len(clusters)) + bar_width *
+               (len(algorithms) - 1) / 2, x_tick_labels)
     plt.legend()
     plt.tight_layout()
-    plt.savefig(os.path.join(report_dir, 'bundled_algorithm_performance_bar.png'))
+    plt.savefig(os.path.join(
+        report_dir, 'bundled_algorithm_performance_bar.png'))
     plt.close()
-    
+
+    # Generate a coverage ratio heatmap
+    plt.figure(figsize=(14, 10))
+    coverage_pivot = bundled_performance.pivot_table(
+        index='cluster',
+        columns='algorithm',
+        values='coverage_ratio',
+        aggfunc='mean'
+    )
+    sns.heatmap(coverage_pivot, annot=True, cmap="Greens", fmt=".1%")
+    plt.title(
+        'User Coverage Ratio by Cluster and Algorithm (% of Original Users with Predictions)')
+    plt.tight_layout()
+    plt.savefig(os.path.join(report_dir, 'coverage_ratio_heatmap.png'))
+    plt.close()
+
     print(f"\nAll report files saved to {report_dir}")
 
 
