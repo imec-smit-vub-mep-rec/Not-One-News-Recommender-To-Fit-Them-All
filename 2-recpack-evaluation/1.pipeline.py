@@ -1,11 +1,18 @@
+"""
+Usage: python 1.pipeline.py <folder path>
+
+Description: Run the recommendation pipeline analysis for a given cluster file.
+"""
+
 from recpack.pipelines import PipelineBuilder
-from recpack.scenarios import StrongGeneralizationTimed
+from recpack.scenarios import Timed
 from recpack.preprocessing.preprocessors import DataFramePreprocessor
 from recpack.preprocessing.filters import MinItemsPerUser, MinUsersPerItem
 import pandas as pd
 import numpy as np
 from scipy import stats
 import os
+import sys
 
 
 def run_pipeline_analysis(cluster_file):
@@ -40,8 +47,7 @@ def run_pipeline_analysis(cluster_file):
     t_validation = df['impression_time'].quantile(0.8)
     t_test = df['impression_time'].quantile(0.9)
 
-    scenario = StrongGeneralizationTimed(
-        frac_users_in=0.8,
+    scenario = Timed(
         t=t_test,
         t_validation=t_validation,
         validation=True
@@ -54,24 +60,32 @@ def run_pipeline_analysis(cluster_file):
 
     builder.add_algorithm('Popularity')
     builder.add_algorithm('EASE', grid={
-        'l2': [0.01, 0.1, 0.5],
-        'alpha': [0.1, 0.5, 1.0],
-        'density': [0.01, 0.05, 0.1]
+        'l2': [1, 10, 100, 1000],
     })
     builder.add_algorithm('ItemKNN', grid={
         'K': [50, 100, 200],
-        'normalize_sim': [True]
+        'normalize_sim': [True, False],
+        'normalize_X': [True, False]
     })
 
-    builder.set_optimisation_metric('NDCGK', K=10)
+    builder.set_optimisation_metric('NDCGK', K=100)
     builder.add_metric('NDCGK', K=[10, 20, 50])
-    builder.add_metric('CoverageK', K=[10, 20])
+    # builder.add_metric('CoverageK', K=[10, 20])
 
     # Build and run pipeline
     pipeline = builder.build()
     pipeline.run()
 
-    return pipeline.get_metrics()
+    # Details are present in pipeline
+    # .acc --> details: call .results on metric objects (nested under metric name and k)
+    # 1. user_ids score (internal user_ids)
+    # 2. Convert back to normal uids: proc.user_id_mapping (uid is internal user_ids)
+    # 3. Left join on original df to link results to original users: proc.user_id_mapping.join(ndcg20_itemknn, left_on='usd', right_on='user_id', how='left')
+    # .metrics --> Aggregated results
+
+    metrics = pipeline.get_metrics()
+
+    return proc, metrics, pipeline._metric_acc.acc
 
 
 def perform_statistical_analysis(all_metrics):
@@ -160,33 +174,50 @@ def perform_statistical_analysis(all_metrics):
 
 def main():
     # Setup
-    folder = 'datasets/ekstra/large/random'
+    folder = sys.argv[1]
     print(f"Processing {folder}")
 
-    # Process all clusters
-    all_metrics = {}
-    for i in range(0, 4):
-        cluster_file = f'{folder}/split_{i}.csv'
-        print(f"Processing {cluster_file}")
-        if os.path.exists(cluster_file):
-            metrics = run_pipeline_analysis(cluster_file)
-            all_metrics[f'cluster_{i}'] = metrics
+    # Combine all the clusters in the folder into one file
+    combined_file = f'{folder}/combined_clusters.csv'
+    if os.path.exists(combined_file):
+        os.remove(combined_file)
 
-    # Perform statistical analysis
-    statistical_results = perform_statistical_analysis(all_metrics)
+    # Process files in sorted order for consistency
+    csv_files = sorted([f for f in os.listdir(folder) if f.endswith('.csv')])
 
-    # Write results to file
-    output_file = f'{folder}/recpack_results.txt'
-    os.makedirs(os.path.dirname(output_file), exist_ok=True)
-    with open(output_file, 'w') as f:
-        f.write("=== Detailed Results ===\n\n")
-        for cluster, metrics in all_metrics.items():
-            f.write(f"\n{cluster}:\n")
-            f.write(str(metrics))
-            f.write("\n" + "="*50 + "\n")
+    # Write first file with header
+    if csv_files:
+        df = pd.read_csv(os.path.join(folder, csv_files[0]))
+        df.to_csv(combined_file, index=False)
 
-        f.write("\n=== Statistical Analysis ===\n\n")
-        f.write(statistical_results)
+        # Append remaining files without header
+        for file in csv_files[1:]:
+            df = pd.read_csv(os.path.join(folder, file))
+            df.to_csv(combined_file, mode='a', header=False, index=False)
+
+    # Run the pipeline analysis on the combined file
+    proc, metrics, all_metrics = run_pipeline_analysis(combined_file)
+
+    # Write overall metrics to file
+    metrics.to_csv(f'{folder}/overall_metrics.csv', index=False)
+
+    # Print the results
+    print("Proc mapping:")
+    print(proc.user_id_mapping)
+    for metric in all_metrics.keys():
+        print(f"\n{metric}:")
+        for k in all_metrics[metric].keys():
+            print(f"K={k}:")
+            print(all_metrics[metric][k])
+            # Left join on original df to link results to original users
+            results = proc.user_id_mapping.merge(
+                all_metrics[metric][k].results, left_on="uid", right_on="user_id", how="left", suffixes=('_ext', '_internal'))
+            print(results.head())
+            # userId and score columns
+            results = results[['user_id_ext', 'score']]
+            # Save to csv
+            results.to_csv(f'{folder}/results/{metric}_k{k}.csv', index=False)
+            # todo: map to original users in other file
 
 
 if __name__ == "__main__":

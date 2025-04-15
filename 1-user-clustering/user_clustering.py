@@ -17,7 +17,7 @@ from typing import List, Dict, Tuple
 import json
 from sklearn.impute import SimpleImputer
 
-result_folder = 'ekstra/0409-large'
+result_folder = 'ekstra/large'
 dataset = 'ekstra-large'
 # Create results directory if it doesn't exist
 os.makedirs(f'results/user_clusters/{result_folder}', exist_ok=True)
@@ -120,7 +120,8 @@ def create_user_table(merged_df: pd.DataFrame) -> pd.DataFrame:
     subscription_status = merged_df.groupby('user_id')['is_subscriber'].first()
 
     # Convert Unix timestamp to datetime
-    merged_df['impression_time'] = pd.to_datetime(merged_df['impression_time'], unit='s')
+    merged_df['impression_time'] = pd.to_datetime(
+        merged_df['impression_time'], unit='s')
 
     user_table = merged_df.groupby('user_id').agg(
         count_sessions=('session_id', 'nunique'),  # Number of sessions

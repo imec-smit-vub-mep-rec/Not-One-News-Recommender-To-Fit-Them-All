@@ -3,7 +3,7 @@ Function to split the data into multiple parts with specified percentages and sa
 Ensures all data from the same user stays together in the same split.
 
 Usage:
-python user_split_generator.py \
+python random_split_generator.py \
   --behaviors datasets/ekstra-large/behaviors.parquet \
   --articles datasets/ekstra-large/articles.parquet \
   --output_dir results/data_splits \
