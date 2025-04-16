@@ -16,8 +16,9 @@ import os
 from typing import List, Dict, Tuple
 import json
 from sklearn.impute import SimpleImputer
+from kneed import KneeLocator
 
-result_folder = 'ekstra/large'
+result_folder = 'ekstra-large'
 dataset = 'ekstra-large'
 # Create results directory if it doesn't exist
 os.makedirs(f'results/user_clusters/{result_folder}', exist_ok=True)
@@ -120,8 +121,10 @@ def create_user_table(merged_df: pd.DataFrame) -> pd.DataFrame:
     subscription_status = merged_df.groupby('user_id')['is_subscriber'].first()
 
     # Convert Unix timestamp to datetime
+    # Print the first 5 impression_time values
+    print(merged_df['impression_time'].head())
     merged_df['impression_time'] = pd.to_datetime(
-        merged_df['impression_time'], unit='s')
+        merged_df['impression_time'], unit='ms')
 
     user_table = merged_df.groupby('user_id').agg(
         count_sessions=('session_id', 'nunique'),  # Number of sessions
@@ -253,10 +256,10 @@ def prepare_clustering_data(user_table: pd.DataFrame) -> Tuple[pd.DataFrame, Sta
         'avg_categories_per_session',
         'avg_category_switches',
         'avg_session_duration',
-        'percentage_morning',
-        'percentage_afternoon',
-        'percentage_evening',
-        'percentage_night'
+        # 'percentage_morning',
+        # 'percentage_afternoon',
+        # 'percentage_evening',
+        # 'percentage_night'
     ]
 
     # Create feature matrix
@@ -302,7 +305,6 @@ def find_optimal_clusters(X: pd.DataFrame, max_clusters: int = 10) -> int:
     plt.close()
 
     # Find elbow point using kneed library
-    from kneed import KneeLocator
     kneedle = KneeLocator(K, distortions, curve='convex',
                           direction='decreasing')
     optimal_k = kneedle.elbow if kneedle.elbow else 5  # Default to 5 if no clear elbow

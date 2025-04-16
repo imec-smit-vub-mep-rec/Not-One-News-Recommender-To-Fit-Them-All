@@ -93,13 +93,13 @@ Example of a line in the addressa dataset:
     ],
     "category1": "nyheter|trondheim",
     "canonicalUrl": "http://www.adressa.no/nyheter/trondheim/2016/12/31/Det-blir-fyrverkeri-14000281.ece",
-    "userId": "cx:kfubh0ub7g8z3g5mgndoaljqd:1w4rvohza6x7d",
+    "userId": "cx:kfubh0ub7g8z3g5mgndoaljqd:1w4rvohza6x7d", <-- important: user_id
     "sessionStop": true,
     "referrerHostClass": "direct",
     "publishtime": "2016-12-31T15:48:48.000Z",
     "sessionStart": true,
     "keywords": "utenriks,innenriks,trondheim,E6,midtbyen,bybrann,bilulykker",
-    "id": "2607fc7d7b4c0ede839a5ff6d499fa428237443e",
+    "id": "2607fc7d7b4c0ede839a5ff6d499fa428237443e", <-- important: article_id
     "eventId": 906331936,
     "city": "trondheim",
     "title": "- Det blir fyrverkeri",
@@ -108,7 +108,7 @@ Example of a line in the addressa dataset:
     "region": "sor-trondelag",
     "author": ["norunn bergesen", "joakim slettebak wangen"],
     "deviceType": "Mobile",
-    "time": 1483225203,
+    "time": 1483225203, <-- important: impression_time
     "os": "iPhone OS"
   }
 """
@@ -302,23 +302,24 @@ def process_addressa_data(input_dir: str, output_dir: str):
 
             # Update article statistics
             article_stats = non_homepage.groupby('url').agg({
+                'id': 'first',  # Get the article ID
                 'publishtime': 'first',
                 'category_str': 'first',
                 'activeTime': ['count', 'sum']
             }).reset_index()
 
-            article_stats.columns = ['url', 'publish_time',
+            article_stats.columns = ['url', 'id', 'publish_time',
                                      'category_str', 'views', 'total_reading_time']
 
             # Create or update articles
             for _, row in article_stats.iterrows():
-                url = row['url']
-                if url not in existing_articles:
+                article_id = row['id'] if 'id' in row and pd.notna(row['id']) else "empty"
+                
+                if article_id not in existing_articles:
                     # Create new article
-                    article_id = str(uuid.uuid4())
-                    existing_articles[url] = {
+                    existing_articles[article_id] = {
                         'article_id': article_id,
-                        'url': url,
+                        'url': row['url'],
                         'publish_time': row['publish_time'],
                         'category_str': row['category_str'],
                         'sentiment_score': 0.5,
@@ -327,8 +328,8 @@ def process_addressa_data(input_dir: str, output_dir: str):
                     }
                 else:
                     # Update existing article
-                    existing_articles[url]['views'] += row['views']
-                    existing_articles[url]['total_reading_time'] += row['total_reading_time']
+                    existing_articles[article_id]['views'] += row['views']
+                    existing_articles[article_id]['total_reading_time'] += row['total_reading_time']
 
             # Convert existing_articles to DataFrame
             articles = pd.DataFrame(list(existing_articles.values()))
@@ -337,7 +338,8 @@ def process_addressa_data(input_dir: str, output_dir: str):
             new_behaviors = pd.DataFrame({
                 'session_id': chunk['session_id'],
                 'impression_id': chunk['eventId'],
-                'article_id': chunk.apply(lambda x: None if x['is_homepage'] else existing_articles.get(x['url'], {}).get('article_id'), axis=1),
+                'article_id': chunk.apply(lambda x: 'homepage' if x['is_homepage'] else 
+                                        existing_articles.get(x.get('id'), existing_articles.get(x['url'], {})).get('article_id'), axis=1),
                 'user_id': chunk['userId'],
                 # Convert to milliseconds
                 'impression_time': chunk['time'] * 1000,

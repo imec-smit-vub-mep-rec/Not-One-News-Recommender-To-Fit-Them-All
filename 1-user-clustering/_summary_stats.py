@@ -3,31 +3,40 @@ import os
 from tabulate import tabulate
 
 # Paths to datasets
-ADDRESSA_PATH = os.path.join('..', '1-user-clustering', 'datasets', 'addressa-large')
-EKSTRA_PATH = os.path.join('..', '1-user-clustering', 'datasets', 'ekstra-large')
+ADDRESSA_PATH = os.path.join(
+    '..', '1-user-clustering', 'datasets', 'adressa-large-0416')
+EKSTRA_PATH = os.path.join('..', '1-user-clustering',
+                           'datasets', 'ekstra-large')
 
-def calculate_stats(dataset_path, dataset_name):
+
+def calculate_stats(dataset_path, dataset_name, remove_empty_articles=False):
     """Calculate summary statistics for a dataset."""
     print(f"\nProcessing {dataset_name} dataset...")
-    
+
     # Load data
     behaviors_path = os.path.join(dataset_path, 'behaviors.parquet')
     articles_path = os.path.join(dataset_path, 'articles.parquet')
-    
+
     behaviors = pd.read_parquet(behaviors_path)
     articles = pd.read_parquet(articles_path)
-    
+
+    if remove_empty_articles:
+        behaviors = behaviors[behaviors['article_id'].notna() &
+                              (behaviors['article_id'] != 'empty') &
+                              (behaviors['article_id'] != 'homepage')]
+
     # Calculate statistics
     n_users = behaviors['user_id'].nunique()
     n_articles = articles.shape[0]
     n_unique_articles_in_behaviors = behaviors['article_id'].nunique()
     n_impressions = behaviors.shape[0]
-    
+
     # Check if subscriber column exists
     subscriber_percentage = None
     if 'subscriber' in behaviors.columns:
-        subscriber_percentage = (behaviors['subscriber'].sum() / behaviors.shape[0]) * 100
-    
+        subscriber_percentage = (
+            behaviors['is_subscriber'].sum() / behaviors.shape[0]) * 100
+
     # Create statistics dictionary
     stats = {
         'Dataset': dataset_name,
@@ -36,27 +45,34 @@ def calculate_stats(dataset_path, dataset_name):
         'Unique Articles (in behaviors)': f"{n_unique_articles_in_behaviors:,}",
         'Impressions': f"{n_impressions:,}"
     }
-    
+
     if subscriber_percentage is not None:
         stats['Subscriber Percentage'] = f"{subscriber_percentage:.2f}%"
-    
+
     return stats
+
 
 def main():
     """Main function to calculate and display statistics for both datasets."""
     print("Calculating summary statistics for addressa and ekstra datasets...\n")
-    
+
     # Calculate statistics for both datasets
-    addressa_stats = calculate_stats(ADDRESSA_PATH, 'Addressa')
+    addressa_stats = calculate_stats(ADDRESSA_PATH, 'Adressa (with homepage)')
+    addressa_stats_no_homepage = calculate_stats(
+        ADDRESSA_PATH, 'Adressa (no homepage)', remove_empty_articles=True)
     ekstra_stats = calculate_stats(EKSTRA_PATH, 'Ekstra')
-    
+    ekstra_stats_no_homepage = calculate_stats(
+        EKSTRA_PATH, 'Ekstra (no homepage)', remove_empty_articles=True)
+
     # Convert stats to a tabular format
     headers = list(addressa_stats.keys())
-    rows = [list(addressa_stats.values()), list(ekstra_stats.values())]
-    
+    rows = [list(addressa_stats.values()), list(addressa_stats_no_homepage.values(
+    )), list(ekstra_stats.values()), list(ekstra_stats_no_homepage.values())]
+
     # Display results in a table
     print("\nSummary Statistics:")
     print(tabulate(rows, headers=headers, tablefmt="grid"))
+
 
 if __name__ == "__main__":
     main()
