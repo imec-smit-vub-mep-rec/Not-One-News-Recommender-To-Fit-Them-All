@@ -1,1 +1,3 @@
 recpack
+pandas
+tabulate
