@@ -15,7 +15,7 @@ This script takes in a behaviors file and creates an interactions file
     - Number of interactions per article (mean, min, max, std)
     
 Usage: python _behaviors_to_interactions.py --input <path-to-behaviors-file> --output-dir <path-to-output-directory>
-python _behaviors_to_interactions.py --input ./datasets/adressa-large-0416/behaviors.parquet --output-dir ./datasets/adressa-large-0416/interactions
+python _behaviors_to_interactions.py --input ./datasets/adressa-large-0416/behaviors.parquet --output-dir ./datasets/adressa-large/interactions
 """
 
 import pandas as pd

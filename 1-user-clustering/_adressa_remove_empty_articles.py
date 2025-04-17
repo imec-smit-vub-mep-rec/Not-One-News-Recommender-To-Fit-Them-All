@@ -22,8 +22,8 @@ print(f"Empty article_id: {df[df['article_id'].isna()].shape[0]}")
 print(f"Homepage article_id: {df[df['article_id'] == 'homepage'].shape[0]}")
 
 # Step 1: Remove rows where article_id is empty
-df_no_empty = df.dropna(subset=['article_id'])
-print("\nAfter removing empty article_id:")
+df_no_empty = df[df['article_id'].notna() &
+                 (df['article_id'] != 'empty')]
 print(f"Rows removed: {len(df) - len(df_no_empty)}")
 print(f"Remaining rows: {len(df_no_empty)}")
 
@@ -37,7 +37,8 @@ print(f"Homepage rows modified: {homepage_count}")
 print(f"Total rows: {len(df_with_homepage)}")
 
 # Save the result with homepage as empty
-df_with_homepage.to_parquet('datasets/adressa-large-0416/behaviors_with_homepage.parquet')
+df_with_homepage.to_parquet(
+    'datasets/adressa-large-0416/behaviors_with_homepage.parquet')
 print("Saved as behaviors_with_homepage.parquet")
 
 # Step 3: Remove the homepage (now empty) rows
@@ -47,11 +48,11 @@ print(f"Rows removed: {len(df_with_homepage) - len(df_no_homepage)}")
 print(f"Final row count: {len(df_no_homepage)}")
 
 # Save the result without homepage
-df_no_homepage.to_parquet('datasets/adressa-large-0416/behaviors_no_homepage.parquet')
+df_no_homepage.to_parquet(
+    'datasets/adressa-large-0416/behaviors_no_homepage.parquet')
 print("Saved as behaviors_no_homepage.parquet")
 
 print("\nComplete! Summary:")
 print(f"Original: {len(df)} rows")
 print(f"After removing empty: {len(df_no_empty)} rows")
 print(f"After removing homepage: {len(df_no_homepage)} rows")
-

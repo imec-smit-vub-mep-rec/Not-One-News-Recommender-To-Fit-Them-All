@@ -18,8 +18,8 @@ import json
 from sklearn.impute import SimpleImputer
 from kneed import KneeLocator
 
-result_folder = 'ekstra-large'
-dataset = 'ekstra-large'
+result_folder = 'adressa-large'
+dataset = 'adressa-large'
 # Create results directory if it doesn't exist
 os.makedirs(f'results/user_clusters/{result_folder}', exist_ok=True)
 
