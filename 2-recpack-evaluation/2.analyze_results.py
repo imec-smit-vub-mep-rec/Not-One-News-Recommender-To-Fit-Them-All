@@ -18,14 +18,21 @@ import itertools
 
 def load_cluster_data(folder):
     """Load all cluster files and create a mapping of user_ids to cluster numbers."""
+    cluster_folder = os.path.join(folder, '1.input.clusters')
+    if not os.path.exists(cluster_folder):
+        print(f"Cluster data folder not found in {folder}")
+        return None, None
+    else:
+        print(f"Cluster data folder found in {folder}")
+
     user_cluster_map = {}
     cluster_user_counts = {}  # Track original number of users per cluster
 
     # Process each cluster file
-    for file in os.listdir(folder):
+    for file in os.listdir(cluster_folder):
         if file.startswith('cluster_') and file.endswith('_merged.csv'):
             cluster_num = int(file.split('_')[1])
-            df = pd.read_csv(os.path.join(folder, file), low_memory=False)
+            df = pd.read_csv(os.path.join(cluster_folder, file), low_memory=False)
 
             # Count users in this cluster
             unique_users = df['user_id'].unique()
@@ -40,7 +47,7 @@ def load_cluster_data(folder):
 
 def analyze_results(base_folder):
     """Analyze the results for each algorithm and metric across clusters."""
-    results_folder = os.path.join(base_folder, 'results')
+    results_folder = os.path.join(base_folder, '2.output.recpack_results')
     user_cluster_map, original_cluster_sizes = load_cluster_data(base_folder)
 
     if not user_cluster_map:
@@ -56,11 +63,11 @@ def analyze_results(base_folder):
         print(f"Cluster {cluster}: {count} users")
 
     # Create output directory for reports
-    report_dir = os.path.join(base_folder, 'cluster_reports')
+    report_dir = os.path.join(base_folder, '3.output.mapping')
     os.makedirs(report_dir, exist_ok=True)
 
     # Read overall metrics for reference if available
-    overall_metrics_path = os.path.join(base_folder, 'overall_metrics.csv')
+    overall_metrics_path = os.path.join(results_folder, 'overall_metrics.csv')
     if os.path.exists(overall_metrics_path):
         overall_metrics = pd.read_csv(overall_metrics_path, low_memory=False)
         print("\nOverall Metrics:")
@@ -478,7 +485,7 @@ def analyze_results(base_folder):
     bundled_performance = all_performance.groupby(['algorithm', 'cluster']).agg({
         'mean': 'mean',
         'zero_proportion': 'mean',
-        'recpack_user_count': 'sum',
+        'recpack_user_count': 'mean',  # Changed from 'sum' to 'mean' to avoid overcounting
         # Take the first value as it should be the same for all
         'original_user_count': 'first'
     }).reset_index()
@@ -541,8 +548,13 @@ def analyze_results(base_folder):
     algorithms = sorted(bundled_performance['algorithm'].unique())
 
     # Get average coverage ratio per cluster for title
-    avg_coverage = bundled_performance.groupby(
-        'cluster')['coverage_ratio'].mean()
+    # We'll compute this directly from the original data to avoid aggregation issues
+    cluster_coverage = all_performance.groupby('cluster').agg({
+        'recpack_user_count': 'mean',  # Use mean instead of sum
+        'original_user_count': 'first'  # Original count should be the same for all rows of a cluster
+    })
+    cluster_coverage['coverage_ratio'] = cluster_coverage['recpack_user_count'] / cluster_coverage['original_user_count']
+    avg_coverage = cluster_coverage['coverage_ratio']
 
     # Set up the plot
     bar_width = 0.8 / len(algorithms)
@@ -581,11 +593,12 @@ def analyze_results(base_folder):
 
     # Generate a coverage ratio heatmap
     plt.figure(figsize=(14, 10))
+    # Create a new pivot table specifically for coverage ratio to avoid aggregation issues
     coverage_pivot = bundled_performance.pivot_table(
         index='cluster',
         columns='algorithm',
         values='coverage_ratio',
-        aggfunc='mean'
+        aggfunc='mean'  # Mean is appropriate here since we're already working with ratios
     )
     sns.heatmap(coverage_pivot, annot=True, cmap="Greens", fmt=".1%")
     plt.title(
@@ -601,6 +614,6 @@ if __name__ == "__main__":
     if len(sys.argv) > 1:
         base_folder = sys.argv[1]
     else:
-        base_folder = 'datasets/ekstra/large/0407'  # Default folder
+        base_folder = 'datasets/adressa'  # Default folder
 
     analyze_results(base_folder)
