@@ -36,29 +36,38 @@ class SentenceTransformerContentBased(Algorithm):
 
     def __init__(self, content: dict, language: str = 'all-MiniLM-L6-v2', metric: str = "dot", embedding_dim: int | None = None, n_trees: int = 10, num_neighbors: int = 100, user_offset_factor: int = 1):
         super().__init__()  # Initialize the base Algorithm class
-        self.sentencetransformer = SentenceTransformer(language)
 
-        # Infer embedding dimension if not provided
-        if embedding_dim is None:
+        # Store parameters directly as public attributes for get_params()
+        self.content = content
+        self.language = language
+        self.metric = metric
+        self.embedding_dim = embedding_dim # Stores the input parameter (could be None)
+        self.n_trees = n_trees
+        self.num_neighbors = num_neighbors
+        self.user_offset_factor = user_offset_factor
+
+        # Initialize SentenceTransformer
+        self.sentencetransformer = SentenceTransformer(self.language)
+
+        # Infer actual embedding dimension if not provided
+        if self.embedding_dim is None:
             # Encode a dummy text to get the embedding dimension
             dummy_embedding = self.sentencetransformer.encode("dummy text")
-            self._embedding_dim = dummy_embedding.shape[0]
+            self._embedding_dim = dummy_embedding.shape[0] # Internal actual dimension
         else:
-            self._embedding_dim = embedding_dim
+            self._embedding_dim = self.embedding_dim # Internal actual dimension
 
-        self.annoy_index = AnnoyIndex(self._embedding_dim, metric)
-        self.n_trees = n_trees
-        self.content = content  # {item_id: "item description"}
-        self._user_offset_factor = user_offset_factor
+        # Initialize Annoy index
+        self.annoy_index = AnnoyIndex(self._embedding_dim, self.metric)
+
+        # Internal state attributes
         self._user_offset = None  # Will be calculated in _fit
-        self.num_neighbors = num_neighbors
-        self._metric = metric
         self._users_in_annoy = set()  # Keep track of users successfully added
 
     def _fit(self, X: csr_matrix):
         num_U, num_I = X.shape
-        # Ensure user IDs are distinct from item IDs
-        self._user_offset = num_I * self._user_offset_factor
+        # Ensure user IDs are distinct from item IDs using the public attribute
+        self._user_offset = num_I * self.user_offset_factor
         self._users_in_annoy = set()  # Reset for fitting
 
         print(f"Fitting {self.__class__.__name__}:")
@@ -131,6 +140,12 @@ class SentenceTransformerContentBased(Algorithm):
         # 5. Build the Annoy index
         print("  Building Annoy index...")
         self.annoy_index.build(self.n_trees)
+
+        # Add attributes expected by check_is_fitted
+        self.n_features_in_ = num_I
+        self.n_users_ = num_U
+        self.n_items_ = num_I
+
         print("  Fit complete.")
 
     # X is often unused in prediction for CB, but kept for interface consistency
@@ -172,11 +187,11 @@ class SentenceTransformerContentBased(Algorithm):
                         score = -1.0  # Default score
                         try:
                             # Calculate score based on metric if possible, otherwise fallback
-                            if self._metric == 'angular':
+                            if self.metric == 'angular':
                                 # For angular (cosine sim), dist = sqrt(2*(1-cos)), so cos = 1 - dist^2 / 2
                                 # Assuming embeddings are normalized (common for SBERT), cos sim = dot product
                                 score = 1.0 - (dist**2) / 2.0
-                            elif self._metric == 'dot':
+                            elif self.metric == 'dot':
                                 # For dot product, Annoy uses Euclidean distance on normalized vectors internally? Check Annoy docs.
                                 # Or maybe it stores normalized vectors and uses angular?
                                 # Let's assume the distance relates to dot product: dist = sqrt(Sum((v_user - v_item)^2))

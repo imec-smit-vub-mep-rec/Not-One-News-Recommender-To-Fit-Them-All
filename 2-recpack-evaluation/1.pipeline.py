@@ -87,7 +87,7 @@ def run_pipeline_analysis(cluster_file, articles_content_path):
     builder.add_algorithm('SentenceTransformerContentBased', params={
         'content': articles_content,
         'language': 'intfloat/multilingual-e5-large',
-        'metric': 'dot',
+        'metric': 'angular',
         'embedding_dim': 1024,
         'n_trees': 10,
         'num_neighbors': 30,
