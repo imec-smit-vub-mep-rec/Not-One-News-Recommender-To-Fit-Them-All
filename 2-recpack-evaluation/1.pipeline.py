@@ -5,7 +5,8 @@ Description: Run the recommendation pipeline analysis for a given cluster file.
 """
 
 from recpack.pipelines import PipelineBuilder
-from recpack.scenarios import WeakGeneralization, Timed
+from recpack.scenarios import WeakGeneralization, Timed, LastItemPrediction
+from SentenceTransformerContentBased import SentenceTransformerContentBased
 from recpack.preprocessing.preprocessors import DataFramePreprocessor
 from recpack.preprocessing.filters import MinItemsPerUser, MinUsersPerItem
 import pandas as pd
@@ -13,9 +14,10 @@ import numpy as np
 from scipy import stats
 import os
 import sys
+from recpack.pipelines import ALGORITHM_REGISTRY
 
 
-def run_pipeline_analysis(cluster_file):
+def run_pipeline_analysis(cluster_file, articles_content_path):
     """Run the recommendation pipeline analysis for a given cluster file."""
     # Load data
     df_original = pd.read_csv(cluster_file)
@@ -50,18 +52,31 @@ def run_pipeline_analysis(cluster_file):
     print("Interaction matrix shape:", interaction_matrix.shape)
 
     # Calculate timestamps for splits
-    t_validation = df['impression_time'].quantile(0.8)
-    t_test = df['impression_time'].quantile(0.9)
+    t_validation = df['impression_time'].quantile(0.71)
+    t_test = df['impression_time'].quantile(0.86)
 
-    scenario = WeakGeneralization(
-        frac_data_in=0.8,
-        validation=True
-    )
+    # scenario = WeakGeneralization(
+    #     frac_data_in=0.8,
+    #     validation=True
+    # )
     # scenario = Timed(
     #     t=t_test,
     #     t_validation=t_validation,
     #     validation=True
     # )
+    scenario = LastItemPrediction(
+        validation=True,
+        # How much of the historic events to use as input history. Defaults to the maximal integer value.
+        n_most_recent_in=10
+    )
+
+    articles_content = pd.read_csv(articles_content_path)
+    articles_content = articles_content.set_index('article_id')
+    articles_content = articles_content['content'].to_dict()
+
+    ALGORITHM_REGISTRY.register(
+        'SentenceTransformerContentBased', SentenceTransformerContentBased)
+
     scenario.split(interaction_matrix)
 
     # Set up pipeline
@@ -69,8 +84,14 @@ def run_pipeline_analysis(cluster_file):
     builder.set_data_from_scenario(scenario)
 
     builder.add_algorithm('Popularity')
-    builder.add_algorithm('EASE', grid={
-        'l2': [1, 10, 100, 1000],
+    builder.add_algorithm('SentenceTransformerContentBased', params={
+        'content': articles_content,
+        'language': 'intfloat/multilingual-e5-large',
+        'metric': 'dot',
+        'embedding_dim': 1024,
+        'n_trees': 10,
+        'num_neighbors': 30,
+        'user_offset_factor': 1
     })
     builder.add_algorithm('ItemKNN', grid={
         'K': [50, 100, 200],
@@ -106,8 +127,11 @@ def main():
 
     file_path = f'{folder}/interactions.csv'
 
+    articles_content_path = f'{folder}/articles_content.csv'
+
     # Run the pipeline analysis on the combined file
-    proc, metrics, all_metrics = run_pipeline_analysis(file_path)
+    proc, metrics, all_metrics = run_pipeline_analysis(
+        file_path, articles_content_path)
 
     # Write overall metrics to file
     metrics.to_csv(

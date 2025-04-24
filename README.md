@@ -28,3 +28,8 @@ We deliberately chose to split the code into two separate parts, to make a clear
 ### Addressa one_week
 
 ### Ekstra 7_days
+
+#### Prepare content-based recsys: plan
+1. Create embeddings for all articles: Category: Title -> Sentence Embedding Danish
+- https://kennethenevoldsen.github.io/scandinavian-embedding-benchmark/: we choose for https://huggingface.co/intfloat/multilingual-e5-large becuase one of best performing open-source sentence embedders on both Danish and Norwegian
+2. For each user, calculate the average embedding of the articles they have interacted with
