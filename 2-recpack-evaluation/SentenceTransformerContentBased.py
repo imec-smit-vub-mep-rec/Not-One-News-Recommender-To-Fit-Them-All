@@ -66,50 +66,69 @@ class SentenceTransformerContentBased(Algorithm):
         print(f"  Embedding dimension: {self._embedding_dim}")
         print(f"  User offset: {self._user_offset}")
 
-        # 1. Add items to Annoy index
-        print("  Adding items to Annoy index...")
-        items_added = 0
-        for item_id in self.content.keys():
-            content_text = self.content.get(item_id, None)
-            if content_text:
-                embedding = self.sentencetransformer.encode(content_text)
-                self.annoy_index.add_item(item_id, embedding)
-                items_added += 1
-            # else: handle items with no content if necessary (e.g., skip or use default embedding)
-        print(f"    Added {items_added}/{num_I} items with content.")
+        # 1. Prepare item data for batch encoding
+        print("  Preparing item data for encoding...")
+        item_ids_with_content = []
+        content_texts = []
+        # Iterate up to num_I to handle items potentially not in self.content
+        for item_id in range(num_I):
+            text = self.content.get(item_id)
+            if text:
+                item_ids_with_content.append(item_id)
+                content_texts.append(text)
+        print(
+            f"    Found content for {len(item_ids_with_content)}/{num_I} items.")
 
-        # 2. Create user embeddings and add users to Annoy index
+        # 2. Batch encode item content
+        print("  Batch encoding item content...")
+        if content_texts:
+            item_embeddings_array = self.sentencetransformer.encode(
+                content_texts, show_progress_bar=True)
+            # Store embeddings in a dictionary for quick lookup
+            item_embeddings_dict = {item_id: emb for item_id, emb in zip(
+                item_ids_with_content, item_embeddings_array)}
+        else:
+            item_embeddings_dict = {}
+            print("    No item content found to encode.")
+
+        # 3. Add items with embeddings to Annoy index
+        print("  Adding items to Annoy index...")
+        items_added_to_annoy = 0
+        for item_id, embedding in item_embeddings_dict.items():
+            # Ensure embedding is numpy array (Annoy expects list or numpy array)
+            if not isinstance(embedding, np.ndarray):
+                embedding = np.array(embedding)
+            self.annoy_index.add_item(item_id, embedding)
+            items_added_to_annoy += 1
+        print(f"    Added {items_added_to_annoy} items to Annoy.")
+
+        # 4. Create user embeddings and add users to Annoy index
         print("  Creating user embeddings and adding users to Annoy index...")
-        users_added = 0
+        users_added_to_annoy = 0
         for user_id in range(num_U):
             items_interacted_indices = X[user_id].nonzero()[1]
 
             if len(items_interacted_indices) > 0:
-                item_embeddings = []
+                # Collect embeddings of interacted items that have content
+                user_item_embeddings = []
                 for item_id in items_interacted_indices:
-                    # Check if item was added to Annoy (i.e., had content)
-                    # Use get_item_vector which raises IndexError if item not found
-                    try:
-                        item_embedding = self.annoy_index.get_item_vector(
-                            item_id)
-                        item_embeddings.append(item_embedding)
-                    except IndexError:
-                        # Item wasn't added, likely due to missing content. Skip.
-                        pass
+                    if item_id in item_embeddings_dict:
+                        user_item_embeddings.append(
+                            item_embeddings_dict[item_id])
 
-                if item_embeddings:
+                if user_item_embeddings:
                     # Calculate average embedding for the user
-                    user_embedding = np.mean(item_embeddings, axis=0)
+                    user_embedding = np.mean(user_item_embeddings, axis=0)
                     # Add the user to the annoy index with an offset
                     annoy_user_id = user_id + self._user_offset
                     self.annoy_index.add_item(annoy_user_id, user_embedding)
                     # Track users successfully added
                     self._users_in_annoy.add(user_id)
-                    users_added += 1
+                    users_added_to_annoy += 1
         print(
-            f"    Added {users_added}/{num_U} users with valid interaction history.")
+            f"    Added {users_added_to_annoy}/{num_U} users to Annoy with valid interaction history.")
 
-        # 3. Build the Annoy index
+        # 5. Build the Annoy index
         print("  Building Annoy index...")
         self.annoy_index.build(self.n_trees)
         print("  Fit complete.")
@@ -124,44 +143,65 @@ class SentenceTransformerContentBased(Algorithm):
 
         print(f"Predicting recommendations for {num_U} users...")
 
+        # Determine a reasonable number of candidates to fetch from Annoy.
+        # Fetching slightly more than num_neighbors helps account for filtering.
+        # Fetching too many (like num_I + num_U) is inefficient.
+        # Let's use a factor (e.g., 3) times num_neighbors, capped by the total index size.
+        num_candidates_to_fetch = min(
+            self.num_neighbors * 3, self.annoy_index.get_n_items())
+
         for user_id in range(num_U):
             if user_id not in self._users_in_annoy:
-                # Skip users who couldn't be added during fit (e.g., no interactions)
                 continue
 
             annoy_user_id = user_id + self._user_offset
+            user_interactions = set(X[user_id].nonzero()[1])
 
             try:
-                # Query Annoy for nearest items
-                # Search for more items than needed initially to allow filtering
-                # search_k=-1 means Annoy will inspect n_trees * n_items nodes
+                # Query Annoy for nearest items (potential candidates)
                 nn_indices, nn_distances = self.annoy_index.get_nns_by_item(
-                    annoy_user_id, num_I + num_U, search_k=-1, include_distances=True
+                    annoy_user_id, num_candidates_to_fetch, search_k=-1, include_distances=True
                 )
 
-                user_embedding = self.annoy_index.get_item_vector(
-                    annoy_user_id)
-
                 potential_recs = []
-                user_interactions = set(X[user_id].nonzero()[1])
+                user_embedding = None  # Lazy load user embedding only if needed
 
                 for item_idx, dist in zip(nn_indices, nn_distances):
                     # Filter out users and items already interacted with
                     if item_idx < self._user_offset and item_idx not in user_interactions:
+                        score = -1.0  # Default score
                         try:
-                            item_embedding = self.annoy_index.get_item_vector(
-                                item_idx)
-                            # Calculate dot product similarity
-                            # Note: If metric is 'dot', Annoy returns sqrt(2 - 2*dot_product)
-                            # If metric is 'angular', Annoy returns sqrt(2*(1-cos(angle)))
-                            # We recalculate dot product for clarity and metric independence here
-                            score = np.dot(user_embedding, item_embedding)
+                            # Calculate score based on metric if possible, otherwise fallback
+                            if self._metric == 'angular':
+                                # For angular (cosine sim), dist = sqrt(2*(1-cos)), so cos = 1 - dist^2 / 2
+                                # Assuming embeddings are normalized (common for SBERT), cos sim = dot product
+                                score = 1.0 - (dist**2) / 2.0
+                            elif self._metric == 'dot':
+                                # For dot product, Annoy uses Euclidean distance on normalized vectors internally? Check Annoy docs.
+                                # Or maybe it stores normalized vectors and uses angular?
+                                # Let's assume the distance relates to dot product: dist = sqrt(Sum((v_user - v_item)^2))
+                                # If vectors are normalized: dist^2 = Sum(v_user^2) - 2*Sum(v_user*v_item) + Sum(v_item^2)
+                                # dist^2 = 1 - 2*dot_product + 1 = 2 - 2*dot_product
+                                # So, dot_product = 1 - dist^2 / 2
+                                score = 1.0 - (dist**2) / 2.0
+                            else:
+                                # Fallback: For other metrics (euclidean, manhattan) or if unsure,
+                                # recalculate dot product similarity as originally done.
+                                # Requires fetching both user and item embeddings.
+                                if user_embedding is None:
+                                    user_embedding = self.annoy_index.get_item_vector(
+                                        annoy_user_id)
+                                item_embedding = self.annoy_index.get_item_vector(
+                                    item_idx)
+                                score = np.dot(user_embedding, item_embedding)
+
                             potential_recs.append((item_idx, score))
                         except IndexError:
-                            # Item might not exist in index if filtered during fit, ignore.
+                            # Item might not exist in index (e.g., if filtered during fit), ignore.
                             pass
 
                 # Sort potential recommendations by score (higher is better)
+                # Since Annoy returns approximate neighbors, sorting is still necessary.
                 potential_recs.sort(key=lambda x: x[1], reverse=True)
 
                 # Get top N recommendations
@@ -172,12 +212,15 @@ class SentenceTransformerContentBased(Algorithm):
                     result[user_id, item_id] = score
 
             except IndexError:
-                # This user_id + offset was not found in Annoy (shouldn't happen due to self._users_in_annoy check, but safeguard)
+                # User vector might not be in index if build failed for some reason
                 print(
-                    f"Warning: User {user_id} (Annoy ID {annoy_user_id}) not found in Annoy index during prediction.")
+                    f"Warning: User {user_id} (Annoy ID {annoy_user_id}) vector not found in Annoy index during prediction.")
                 continue
             except Exception as e:
                 print(f"Error predicting for user {user_id}: {e}")
+                # Consider logging the error and traceback for debugging
+                import traceback
+                traceback.print_exc()  # Print traceback for detailed error info
                 continue
 
         print("Prediction complete.")
