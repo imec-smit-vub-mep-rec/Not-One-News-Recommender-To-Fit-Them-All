@@ -126,33 +126,7 @@ class SentenceTransformerContentBased(Algorithm):
             items_added_to_annoy += 1
         self._log(f"    Added {items_added_to_annoy} items to Annoy.")
 
-        # 4. Create user embeddings and add users to Annoy index
-        # self._log("  Creating user embeddings and adding users to Annoy index...")
-        # users_added_to_annoy = 0
-        # for user_id in range(num_U):
-        #     items_interacted_indices = X[user_id].nonzero()[1]
-        #
-        #     if len(items_interacted_indices) > 0:
-        #         # Collect embeddings of interacted items that have content
-        #         user_item_embeddings = []
-        #         for item_id in items_interacted_indices:
-        #             if item_id in item_embeddings_dict:
-        #                 user_item_embeddings.append(
-        #                     item_embeddings_dict[item_id])
-        #
-        #         if user_item_embeddings:
-        #             # Calculate average embedding for the user
-        #             user_embedding = np.mean(user_item_embeddings, axis=0)
-        #             # Add the user to the annoy index with an offset
-        #             # annoy_user_id = user_id + self._user_offset # No longer needed
-        #             # self.annoy_index.add_item(annoy_user_id, user_embedding) # No longer needed
-        #             # Track users successfully added # No longer needed
-        #             # self._users_in_annoy.add(user_id) # No longer needed
-        #             # users_added_to_annoy += 1 # No longer needed
-        # self._log(
-        #     f"    Added {users_added_to_annoy}/{num_U} users to Annoy with valid interaction history.") # No longer needed
-
-        # 5. Build the Annoy index
+        # 4. Build the Annoy index
         self._log("  Building Annoy index...")
         self.annoy_index.build(self.n_trees)
 
@@ -165,9 +139,6 @@ class SentenceTransformerContentBased(Algorithm):
 
     def _predict(self, X: csr_matrix):
         num_U, num_I = X.shape
-        # Removed check for self._user_offset as it's no longer used
-        # if self._user_offset is None:
-        #     raise RuntimeError("The model must be fitted before prediction.")
 
         result = lil_matrix((num_U, num_I), dtype=np.float32)
 
