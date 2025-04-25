@@ -5,11 +5,6 @@ from annoy import AnnoyIndex
 from recpack.algorithms.base import Algorithm
 from scipy.sparse import lil_matrix, csr_matrix
 from sentence_transformers import SentenceTransformer
-import logging
-
-# Set more restrictive logging levels for all loggers
-logger = logging.getLogger("recpack")
-logger.setLevel(logging.ERROR)  # Only show errors, not warnings
 
 
 class SentenceTransformerContentBased(Algorithm):
@@ -86,9 +81,6 @@ class SentenceTransformerContentBased(Algorithm):
         self._user_offset = num_I + 100
         self._users_in_annoy = set()  # Reset for fitting
 
-        # Initialize user ID mapping for metrics calculation
-        self._user_id_map = np.arange(num_U)
-
         self._log(f"Fitting {self.__class__.__name__}:")
         self._log(f"  Items: {num_I}, Users: {num_U}")
         self._log(f"  Embedding dimension: {self._embedding_dim}")
@@ -135,30 +127,30 @@ class SentenceTransformerContentBased(Algorithm):
         self._log(f"    Added {items_added_to_annoy} items to Annoy.")
 
         # 4. Create user embeddings and add users to Annoy index
-        self._log("  Creating user embeddings and adding users to Annoy index...")
-        users_added_to_annoy = 0
-        for user_id in range(num_U):
-            items_interacted_indices = X[user_id].nonzero()[1]
-
-            if len(items_interacted_indices) > 0:
-                # Collect embeddings of interacted items that have content
-                user_item_embeddings = []
-                for item_id in items_interacted_indices:
-                    if item_id in item_embeddings_dict:
-                        user_item_embeddings.append(
-                            item_embeddings_dict[item_id])
-
-                if user_item_embeddings:
-                    # Calculate average embedding for the user
-                    user_embedding = np.mean(user_item_embeddings, axis=0)
-                    # Add the user to the annoy index with an offset
-                    annoy_user_id = user_id + self._user_offset
-                    self.annoy_index.add_item(annoy_user_id, user_embedding)
-                    # Track users successfully added
-                    self._users_in_annoy.add(user_id)
-                    users_added_to_annoy += 1
-        self._log(
-            f"    Added {users_added_to_annoy}/{num_U} users to Annoy with valid interaction history.")
+        # self._log("  Creating user embeddings and adding users to Annoy index...")
+        # users_added_to_annoy = 0
+        # for user_id in range(num_U):
+        #     items_interacted_indices = X[user_id].nonzero()[1]
+        #
+        #     if len(items_interacted_indices) > 0:
+        #         # Collect embeddings of interacted items that have content
+        #         user_item_embeddings = []
+        #         for item_id in items_interacted_indices:
+        #             if item_id in item_embeddings_dict:
+        #                 user_item_embeddings.append(
+        #                     item_embeddings_dict[item_id])
+        #
+        #         if user_item_embeddings:
+        #             # Calculate average embedding for the user
+        #             user_embedding = np.mean(user_item_embeddings, axis=0)
+        #             # Add the user to the annoy index with an offset
+        #             # annoy_user_id = user_id + self._user_offset # No longer needed
+        #             # self.annoy_index.add_item(annoy_user_id, user_embedding) # No longer needed
+        #             # Track users successfully added # No longer needed
+        #             # self._users_in_annoy.add(user_id) # No longer needed
+        #             # users_added_to_annoy += 1 # No longer needed
+        # self._log(
+        #     f"    Added {users_added_to_annoy}/{num_U} users to Annoy with valid interaction history.") # No longer needed
 
         # 5. Build the Annoy index
         self._log("  Building Annoy index...")
@@ -171,156 +163,91 @@ class SentenceTransformerContentBased(Algorithm):
 
         self._log("  Fit complete.")
 
-    # X is often unused in prediction for CB, but kept for interface consistency
     def _predict(self, X: csr_matrix):
         num_U, num_I = X.shape
-        if self._user_offset is None:
-            raise RuntimeError("The model must be fitted before prediction.")
+        # Removed check for self._user_offset as it's no longer used
+        # if self._user_offset is None:
+        #     raise RuntimeError("The model must be fitted before prediction.")
 
         result = lil_matrix((num_U, num_I), dtype=np.float32)
 
         self._log(f"Predicting recommendations for {num_U} users...")
-        self._log(f"Items with embeddings: {len(self._item_embeddings)}")
-        self._log(f"Users in Annoy index: {len(self._users_in_annoy)}")
+        self._log(f"Items in Annoy index: {self.annoy_index.get_n_items()}")
+        self._log(
+            f"Items with embeddings in cache: {len(self._item_embeddings)}")
+        # Removed log for users in Annoy index
+        # self._log(f"Users in Annoy index: {len(self._users_in_annoy)}")
 
         # Determine a reasonable number of candidates to fetch from Annoy
-        # Fetching slightly more than num_neighbors helps account for filtering
         num_candidates_to_fetch = min(
             self.num_neighbors * 3, self.annoy_index.get_n_items())
 
         # Stats for debugging
         users_processed = 0
         users_with_recommendations = 0
-        users_without_recommendations = 0
-
-        # Pre-compute a fallback set of popular/diverse items for users with no recommendations
-        # Get all items with embeddings as potential fallbacks
-        fallback_items = list(self._item_embeddings.keys())
-        if not fallback_items:
-            # If no item has embeddings, use all possible item IDs as fallback
-            fallback_items = list(range(num_I))
-
-        # Shuffle fallback items to ensure diversity
-        np.random.shuffle(fallback_items)
-        # Take top K as fallback recommendations
-        fallback_items = fallback_items[:self.num_neighbors]
+        users_with_embedding = 0  # Track users for whom we can generate an embedding
 
         for user_id in range(num_U):
-            # Track progress
             users_processed += 1
             if self.verbose and users_processed % 500 == 0:
                 self._log(f"  Processed {users_processed}/{num_U} users...")
 
-            # Get current user's interactions to filter them out of recommendations
+            # Get current user's interactions to filter them out later
             user_interactions = set(X[user_id].nonzero()[1])
 
+            potential_recs = []
             try:
-                # Two approaches depending on whether user is in the Annoy index
-                if user_id in self._users_in_annoy:
-                    # Method 1: User exists in annoy index, use get_nns_by_item
-                    annoy_user_id = user_id + self._user_offset
+                # 1. Calculate user embedding based on interaction history
+                items_interacted_indices = X[user_id].nonzero()[1]
+                user_item_embeddings = []
+                if len(items_interacted_indices) > 0:
+                    for item_id_interacted in items_interacted_indices:
+                        # Use the cached embeddings from _fit
+                        embedding = self._item_embeddings.get(
+                            item_id_interacted)
+                        if embedding is not None:
+                            user_item_embeddings.append(embedding)
 
-                    nn_indices, nn_distances = self.annoy_index.get_nns_by_item(
-                        annoy_user_id, num_candidates_to_fetch, search_k=-1, include_distances=True
+                # 2. If user has valid embedding, query Annoy
+                if user_item_embeddings:
+                    users_with_embedding += 1
+                    user_embedding = np.mean(user_item_embeddings, axis=0)
+
+                    # Query Annoy by vector to find nearby ITEMS
+                    nn_indices, nn_distances = self.annoy_index.get_nns_by_vector(
+                        user_embedding, num_candidates_to_fetch, search_k=-1, include_distances=True
                     )
 
-                    potential_recs = []
-
+                    # 3. Filter results and calculate scores
                     for item_idx, dist in zip(nn_indices, nn_distances):
-                        # Filter out users (items >= self._user_offset) and already interacted items
-                        if item_idx < self._user_offset and item_idx not in user_interactions:
-                            # Calculate score based on distance metric
+                        # Filter out ALREADY INTERACTED items
+                        # No need to check item_idx < num_I as only items are in the index
+                        if item_idx not in user_interactions:
                             score = self._distance_to_similarity(dist)
                             potential_recs.append((item_idx, score))
-                else:
-                    # Method 2: User not in annoy index, but has interactions in X
-                    # Build user embedding on the fly from recent interactions
-                    if len(user_interactions) > 0:
-                        # Get embeddings for items the user has interacted with
-                        user_item_embeddings = []
-                        for item_id in user_interactions:
-                            if item_id in self._item_embeddings:
-                                user_item_embeddings.append(
-                                    self._item_embeddings[item_id])
-
-                        # If we found embeddings for at least one item, create user embedding
-                        if user_item_embeddings:
-                            user_embedding = np.mean(
-                                user_item_embeddings, axis=0)
-
-                            # Query annoy directly with the vector
-                            nn_indices, nn_distances = self.annoy_index.get_nns_by_vector(
-                                user_embedding, num_candidates_to_fetch, search_k=-1, include_distances=True
-                            )
-
-                            potential_recs = []
-
-                            for item_idx, dist in zip(nn_indices, nn_distances):
-                                # Filter out users and already interacted items
-                                if item_idx < self._user_offset and item_idx not in user_interactions:
-                                    # Calculate score based on distance metric
-                                    score = self._distance_to_similarity(dist)
-                                    potential_recs.append((item_idx, score))
-                        else:
-                            # No embeddings found for user's items
-                            potential_recs = []
-                    else:
-                        # No interactions for this user
-                        potential_recs = []
 
                 # Process recommendations if any found
                 if potential_recs:
-                    # Sort potential recommendations by score (higher is better)
+                    # Removed print statement for cleaner output
+                    # print(f"User {user_id} has {len(potential_recs)} recommendations")
                     potential_recs.sort(key=lambda x: x[1], reverse=True)
-
-                    # Get top N recommendations
                     top_recs = potential_recs[:self.num_neighbors]
-
-                    # Populate the result matrix
-                    for item_id, score in top_recs:
-                        result[user_id, item_id] = score
-
+                    for item_id_rec, score in top_recs:
+                        # Ensure item_id_rec is within bounds (should be, but safety check)
+                        if 0 <= item_id_rec < num_I:
+                            result[user_id, item_id_rec] = score
                     users_with_recommendations += 1
-                else:
-                    # FALLBACK: Use pre-computed fallback items for users with no recommendations
-                    # Use decreasing scores to maintain a ranking
-                    base_score = 0.5  # Start with a medium confidence score
-                    score_step = base_score / \
-                        len(fallback_items)  # Gradually decrease
-
-                    for i, item_id in enumerate(fallback_items):
-                        if item_id not in user_interactions:  # Still filter out items the user has interacted with
-                            fallback_score = base_score - \
-                                (i * score_step)  # Decreasing scores
-                            result[user_id, item_id] = fallback_score
-
-                    users_without_recommendations += 1
-                    self._log(
-                        f"  Using fallback recommendations for user {user_id}")
 
             except Exception as e:
                 if self.verbose:
                     self._log(f"Error predicting for user {user_id}: {str(e)}")
-                    # More detailed error info for debugging
                     import traceback
                     traceback.print_exc()
 
-                # FALLBACK: Even if there's an exception, use fallback recommendations
-                base_score = 0.3  # Lower confidence for error cases
-                score_step = base_score / len(fallback_items)
-
-                for i, item_id in enumerate(fallback_items):
-                    if item_id not in user_interactions:
-                        fallback_score = base_score - (i * score_step)
-                        result[user_id, item_id] = fallback_score
-
-                users_without_recommendations += 1
-                continue
-
         self._log(
-            f"Prediction complete. Made personalized recommendations for {users_with_recommendations}/{num_U} users.")
-        self._log(
-            f"Used fallback recommendations for {users_without_recommendations}/{num_U} users.")
+            f"Prediction complete. Found embeddings for {users_with_embedding}/{num_U} users. "
+            f"Made personalized recommendations for {users_with_recommendations}/{num_U} users."
+        )
         return result.tocsr()
 
     def _distance_to_similarity(self, distance):
@@ -341,7 +268,7 @@ class SentenceTransformerContentBased(Algorithm):
             # This is approximate and might need adjustment
             return 1.0 / (1.0 + distance)
 
-    # Add this method to ensure compatibility with recpack metrics
+    # Method to ensure compatibility with recpack metrics
     def _eliminate_empty_users(self, y_true, y_pred):
         """This method ensures users are properly mapped for metrics calculation.
         It overrides the default behavior in recpack.metrics.base.Metric."""

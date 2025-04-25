@@ -102,8 +102,8 @@ def run_pipeline_analysis(cluster_file, articles_content_path):
             internal_id = id_mapping[orig_id]
             # Truncate content to reduce memory and prevent verbose printing
             content = row['content']
-            if len(content) > 200:  # Limit content length to reduce verbosity
-                content = content[:200]
+            if len(content) > 500:  # Limit content length to reduce verbosity
+                content = content[:500]
             content_dict[internal_id] = content
             article_count += 1
 
@@ -125,7 +125,7 @@ def run_pipeline_analysis(cluster_file, articles_content_path):
     scenario = LastItemPrediction(
         validation=True,
         # How much of the historic events to use as input history. Defaults to the maximal integer value.
-        n_most_recent_in=10
+        n_most_recent_in=30
     )
 
     scenario.split(interaction_matrix)
@@ -140,13 +140,13 @@ def run_pipeline_analysis(cluster_file, articles_content_path):
 
     # builder.add_algorithm('Popularity')
     builder.add_algorithm('SentenceTransformerContentBased', params={
-        'content': content_dict,  # Now using properly mapped content dictionary
+        'content': content_dict,
         'language': 'intfloat/multilingual-e5-large',
         'metric': 'angular',
         'embedding_dim': 1024,
         'n_trees': 10,
-        'num_neighbors': 30,
-        'verbose': False,  # Disable verbose output
+        'num_neighbors': 10,
+        'verbose': True,
     })
     # builder.add_algorithm('ItemKNN', grid={
     #     'K': [50, 100, 200],
