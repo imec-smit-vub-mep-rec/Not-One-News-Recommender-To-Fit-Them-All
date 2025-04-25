@@ -126,7 +126,7 @@ class SentenceTransformerContentBased(Algorithm):
             items_added_to_annoy += 1
         self._log(f"    Added {items_added_to_annoy} items to Annoy.")
 
-        # 4. Build the Annoy index
+        # 5. Build the Annoy index
         self._log("  Building Annoy index...")
         self.annoy_index.build(self.n_trees)
 
@@ -139,6 +139,9 @@ class SentenceTransformerContentBased(Algorithm):
 
     def _predict(self, X: csr_matrix):
         num_U, num_I = X.shape
+        # Removed check for self._user_offset as it's no longer used
+        # if self._user_offset is None:
+        #     raise RuntimeError("The model must be fitted before prediction.")
 
         result = lil_matrix((num_U, num_I), dtype=np.float32)
 
@@ -192,15 +195,12 @@ class SentenceTransformerContentBased(Algorithm):
                     # 3. Filter results and calculate scores
                     for item_idx, dist in zip(nn_indices, nn_distances):
                         # Filter out ALREADY INTERACTED items
-                        # No need to check item_idx < num_I as only items are in the index
                         if item_idx not in user_interactions:
                             score = self._distance_to_similarity(dist)
                             potential_recs.append((item_idx, score))
 
                 # Process recommendations if any found
                 if potential_recs:
-                    # Removed print statement for cleaner output
-                    # print(f"User {user_id} has {len(potential_recs)} recommendations")
                     potential_recs.sort(key=lambda x: x[1], reverse=True)
                     top_recs = potential_recs[:self.num_neighbors]
                     for item_id_rec, score in top_recs:

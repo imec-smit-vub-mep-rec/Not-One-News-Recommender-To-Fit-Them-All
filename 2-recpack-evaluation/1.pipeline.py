@@ -113,20 +113,20 @@ def run_pipeline_analysis(cluster_file, articles_content_path):
     t_validation = df['impression_time'].quantile(0.71)
     t_test = df['impression_time'].quantile(0.86)
 
-    # scenario = WeakGeneralization(
-    #     frac_data_in=0.8,
-    #     validation=True
-    # )
+    scenario = WeakGeneralization(
+        frac_data_in=0.8,
+        validation=True
+    )
     # scenario = Timed(
     #     t=t_test,
     #     t_validation=t_validation,
     #     validation=True
     # )
-    scenario = LastItemPrediction(
-        validation=True,
-        # How much of the historic events to use as input history. Defaults to the maximal integer value.
-        n_most_recent_in=30
-    )
+    # scenario = LastItemPrediction(
+    #     validation=True,
+    #     # How much of the historic events to use as input history. Defaults to the maximal integer value.
+    #     n_most_recent_in=30
+    # )
 
     scenario.split(interaction_matrix)
 
@@ -138,21 +138,21 @@ def run_pipeline_analysis(cluster_file, articles_content_path):
     ALGORITHM_REGISTRY.register(
         'SentenceTransformerContentBased', SentenceTransformerContentBased)
 
-    # builder.add_algorithm('Popularity')
+    builder.add_algorithm('Popularity')
     builder.add_algorithm('SentenceTransformerContentBased', params={
         'content': content_dict,
         'language': 'intfloat/multilingual-e5-large',
         'metric': 'angular',
         'embedding_dim': 1024,
-        'n_trees': 10,
-        'num_neighbors': 10,
+        'n_trees': 20,
+        'num_neighbors': 100,
         'verbose': True,
     })
-    # builder.add_algorithm('ItemKNN', grid={
-    #     'K': [50, 100, 200],
-    #     'normalize_sim': [True, False],
-    #     'normalize_X': [True, False]
-    # })
+    builder.add_algorithm('ItemKNN', grid={
+        'K': [50, 100, 200],
+        'normalize_sim': [True, False],
+        'normalize_X': [True, False]
+    })
 
     builder.set_optimisation_metric('NDCGK', K=100)
     builder.add_metric('NDCGK', K=[10, 20, 50])
@@ -205,7 +205,14 @@ def main():
             print(all_metrics[metric][k])
             # Left join on original df to link results to original users
             # Adjust column names here too based on actual mapping structure
+
+            # Limit metric name to 10 characters
+            # Ensure metric is converted to string before slicing
+            metric_key_str = str(metric)
+            metric_name = metric_key_str[:10]
+
             try:
+                # Determine join column for the left DataFrame (proc.user_id_mapping)
                 if 'uid' in proc.user_id_mapping.columns:
                     join_col = 'uid'
                 elif 'id' in proc.user_id_mapping.columns:
@@ -214,28 +221,117 @@ def main():
                     # Assume second column is internal ID
                     join_col = proc.user_id_mapping.columns[1]
 
-                results = proc.user_id_mapping.merge(
-                    all_metrics[metric][k].results,
-                    left_on=join_col,
-                    right_on="user_id",
-                    how="left",
-                    suffixes=('_ext', '_internal')
-                )
+                results_df = all_metrics[metric][k].results
 
-                # Use first column as external user ID (original ID)
-                user_id_col = proc.user_id_mapping.columns[0]
-                results = results[[user_id_col, 'score']]
-                # Rename for consistency
-                results.columns = ['user_id_ext', 'score']
+                # --- Debugging Info ---
+                print(f"\n--- Processing {metric_key_str} - {k} ---")
+                print("proc.user_id_mapping columns:", proc.user_id_mapping.columns.tolist())
+                print("proc.user_id_mapping head:\n", proc.user_id_mapping.head())
+                print("results_df columns:", results_df.columns.tolist())
+                print("results_df index:", results_df.index)
+                print("results_df head:\n", results_df.head())
+                # --- End Debugging Info ---
+
+
+                # Determine how to merge based on results_df structure
+                if 'user_id' in results_df.columns:
+                    print(f"Merging results_df on 'user_id' column (right_on='user_id') with proc.user_id_mapping on '{join_col}' column (left_on='{join_col}')")
+                    results = proc.user_id_mapping.merge(
+                        results_df,
+                        left_on=join_col,
+                        right_on='user_id',
+                        how="left",
+                        suffixes=('_ext', '_internal')
+                    )
+                elif results_df.index.name == 'user_id':
+                    print(f"Merging results_df on index (right_index=True) with proc.user_id_mapping on '{join_col}' column (left_on='{join_col}')")
+                    results = proc.user_id_mapping.merge(
+                        results_df,
+                        left_on=join_col,
+                        right_index=True, # Merge on the right DataFrame's index
+                        how="left",
+                        suffixes=('_ext', '_internal')
+                    )
+                elif len(results_df.columns) > 0 and 'score' in results_df.columns:
+                     # Heuristic: If 'user_id' is missing but 'score' is present, assume the first column is user ID
+                     potential_user_col = results_df.columns[0]
+                     print(f"Warning: 'user_id' not found. Assuming first column '{potential_user_col}' is user ID for merge.")
+                     print(f"Merging results_df on '{potential_user_col}' column (right_on='{potential_user_col}') with proc.user_id_mapping on '{join_col}' column (left_on='{join_col}')")
+                     results = proc.user_id_mapping.merge(
+                        results_df,
+                        left_on=join_col,
+                        right_on=potential_user_col,
+                        how="left",
+                        suffixes=('_ext', '_internal')
+                     )
+                else:
+                     print(f"Error: Cannot determine user ID column or index in results_df for {metric_key_str} - {k}.")
+                     print("Skipping merge for this combination.")
+                     continue # Skip this metric/k combination
+
+
+                # --- Post-merge processing ---
+                # Determine the actual name of the external user ID column after merge
+                user_id_col_ext_orig = proc.user_id_mapping.columns[0] # Original external user ID column name
+                user_id_col_ext_suffixed = user_id_col_ext_orig + '_ext'
+
+                if user_id_col_ext_suffixed in results.columns:
+                    user_id_col_to_use = user_id_col_ext_suffixed
+                    print(f"Using suffixed external user ID column: '{user_id_col_to_use}'")
+                elif user_id_col_ext_orig in results.columns:
+                    user_id_col_to_use = user_id_col_ext_orig
+                    print(f"Using original external user ID column: '{user_id_col_to_use}'")
+                else:
+                    print(f"Error: External user ID column ('{user_id_col_ext_orig}' or '{user_id_col_ext_suffixed}') not found in merged results.")
+                    print("Merged columns:", results.columns.tolist())
+                    continue
+
+                # Select external user ID and score
+                if 'score' in results.columns:
+                    results_final = results[[user_id_col_to_use, 'score']].copy()
+                # Fallback if 'score' is not found, assume last column is score if user ID is not the last column
+                elif len(results.columns) > 1 and results.columns[-1] != user_id_col_to_use:
+                     score_col = results.columns[-1]
+                     print(f"Warning: 'score' column not found. Assuming last column '{score_col}' is score.")
+                     results_final = results[[user_id_col_to_use, score_col]].copy()
+                else:
+                     print(f"Error: Cannot determine score column in merged results for {metric_key_str} - {k}.")
+                     # Create dummy score column
+                     results_final = results[[user_id_col_to_use]].copy()
+                     results_final['score'] = np.nan
+
+                # Rename columns for consistency AFTER selection
+                results_final.columns = ['user_id_ext', 'score']
 
                 # Save to csv
-                results.to_csv(
-                    f'{output_folder}/test_k{k}.csv', index=False)
+                output_path = f'{output_folder}/{metric_name}_k{k}.csv'
+                print(f"Saving results to: {output_path}")
+                results_final.to_csv(output_path, index=False)
+
             except Exception as e:
-                print(f"Error processing metric results: {str(e)}")
-                print("Will save raw results instead")
-                all_metrics[metric][k].results.to_csv(
-                    f'{output_folder}/test_k{k}_raw.csv', index=False)
+                print(f"\n--- CRITICAL Error processing metric results for {metric_key_str} - {k} ---")
+                print(f"Error type: {type(e)}")
+                print(f"Error message: {str(e)}")
+                # Print details only if results_df was defined
+                if 'results_df' in locals():
+                    print("results_df columns:", results_df.columns.tolist())
+                    print("results_df index:", results_df.index)
+                    print("results_df head:\n", results_df.head())
+                else:
+                    print("results_df was not defined before the error.")
+
+                # Print traceback for detailed debugging
+                import traceback
+                traceback.print_exc()
+
+                print("Attempting to save raw results instead...")
+                try:
+                    raw_output_path = f'{output_folder}/{metric_name}_k{k}_raw.csv'
+                    # Save with index to help debug raw data
+                    all_metrics[metric][k].results.to_csv(raw_output_path, index=True)
+                    print(f"Saved raw results to: {raw_output_path}")
+                except Exception as e_save:
+                    print(f"Failed to save raw results: {str(e_save)}")
 
 
 if __name__ == "__main__":
