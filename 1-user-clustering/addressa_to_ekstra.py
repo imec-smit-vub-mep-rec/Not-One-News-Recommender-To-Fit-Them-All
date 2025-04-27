@@ -305,16 +305,18 @@ def process_addressa_data(input_dir: str, output_dir: str):
                 'id': 'first',  # Get the article ID
                 'publishtime': 'first',
                 'category_str': 'first',
+                'title': 'first',
                 'activeTime': ['count', 'sum']
             }).reset_index()
 
             article_stats.columns = ['url', 'id', 'publish_time',
-                                     'category_str', 'views', 'total_reading_time']
+                                     'category_str', 'title', 'views', 'total_reading_time']
 
             # Create or update articles
             for _, row in article_stats.iterrows():
-                article_id = row['id'] if 'id' in row and pd.notna(row['id']) else "empty"
-                
+                article_id = row['id'] if 'id' in row and pd.notna(
+                    row['id']) else "empty"
+
                 if article_id not in existing_articles:
                     # Create new article
                     existing_articles[article_id] = {
@@ -322,6 +324,7 @@ def process_addressa_data(input_dir: str, output_dir: str):
                         'url': row['url'],
                         'publish_time': row['publish_time'],
                         'category_str': row['category_str'],
+                        'title': row['title'],
                         'sentiment_score': 0.5,
                         'views': row['views'],
                         'total_reading_time': row['total_reading_time']
@@ -338,8 +341,8 @@ def process_addressa_data(input_dir: str, output_dir: str):
             new_behaviors = pd.DataFrame({
                 'session_id': chunk['session_id'],
                 'impression_id': chunk['eventId'],
-                'article_id': chunk.apply(lambda x: 'homepage' if x['is_homepage'] else 
-                                        existing_articles.get(x.get('id'), existing_articles.get(x['url'], {})).get('article_id'), axis=1),
+                'article_id': chunk.apply(lambda x: 'homepage' if x['is_homepage'] else
+                                          existing_articles.get(x.get('id'), existing_articles.get(x['url'], {})).get('article_id'), axis=1),
                 'user_id': chunk['userId'],
                 # Convert to milliseconds
                 'impression_time': chunk['time'] * 1000,

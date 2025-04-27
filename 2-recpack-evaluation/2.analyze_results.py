@@ -32,7 +32,8 @@ def load_cluster_data(folder):
     for file in os.listdir(cluster_folder):
         if file.startswith('cluster_') and file.endswith('_merged.csv'):
             cluster_num = int(file.split('_')[1])
-            df = pd.read_csv(os.path.join(cluster_folder, file), low_memory=False)
+            df = pd.read_csv(os.path.join(
+                cluster_folder, file), low_memory=False)
 
             # Count users in this cluster
             unique_users = df['user_id'].unique()
@@ -133,6 +134,9 @@ def analyze_results(base_folder):
         try:
             file_path = os.path.join(results_folder, file)
             df = pd.read_csv(file_path, low_memory=False)
+
+            # Remove all rows where score is undefined, NaN, or None
+            df = df[df['score'].notna()]
 
             # Add metadata columns
             df['algorithm'] = algorithm
@@ -551,9 +555,11 @@ def analyze_results(base_folder):
     # We'll compute this directly from the original data to avoid aggregation issues
     cluster_coverage = all_performance.groupby('cluster').agg({
         'recpack_user_count': 'mean',  # Use mean instead of sum
-        'original_user_count': 'first'  # Original count should be the same for all rows of a cluster
+        # Original count should be the same for all rows of a cluster
+        'original_user_count': 'first'
     })
-    cluster_coverage['coverage_ratio'] = cluster_coverage['recpack_user_count'] / cluster_coverage['original_user_count']
+    cluster_coverage['coverage_ratio'] = cluster_coverage['recpack_user_count'] / \
+        cluster_coverage['original_user_count']
     avg_coverage = cluster_coverage['coverage_ratio']
 
     # Set up the plot
