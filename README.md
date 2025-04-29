@@ -25,7 +25,7 @@ We deliberately chose to split the code into two separate parts, to make a clear
 
 ## Datasets
 
-### Addressa one_week
+### adressa one_week
 
 ### Ekstra 7_days
 

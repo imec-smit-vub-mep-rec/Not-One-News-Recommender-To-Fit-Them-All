@@ -42,7 +42,7 @@ def run_pipeline_for_scenario(scenario, interaction_matrix, content_dict, proc):
     """Run the recommendation pipeline for a specific scenario."""
     scenario_name = scenario.__class__.__name__
     print(f"\nRunning scenario: {scenario_name}")
-    
+
     scenario.split(interaction_matrix)
 
     # Set up pipeline
@@ -177,7 +177,7 @@ def process_results(proc, metrics, all_metrics, output_folder):
     # Create subfolder for raw data if needed
     raw_folder = os.path.join(output_folder, "raw_data")
     ensure_dir_exists(raw_folder)
-    
+
     # Write overall metrics to file
     metrics.to_csv(
         f'{output_folder}/overall_metrics.csv', index=False)
@@ -359,14 +359,15 @@ def load_cluster_data(folder):
 def analyze_scenario_results(base_folder, results_folder, scenario_name):
     """Analyze the results for a specific scenario."""
     print(f"\n=== Analyzing results for scenario: {scenario_name} ===")
-    
+
     user_cluster_map, original_cluster_sizes = load_cluster_data(base_folder)
 
     if not user_cluster_map:
         print("No cluster data found. Please check the folder path.")
         return
 
-    print(f"Found {len(user_cluster_map)} users across {len(set(user_cluster_map.values()))} clusters")
+    print(
+        f"Found {len(user_cluster_map)} users across {len(set(user_cluster_map.values()))} clusters")
 
     # Print original cluster sizes
     print("\nOriginal cluster sizes (before preprocessing/splitting):")
@@ -385,7 +386,8 @@ def analyze_scenario_results(base_folder, results_folder, scenario_name):
         print(overall_metrics)
 
     # Get all results files
-    result_files = [f for f in os.listdir(results_folder) if f.endswith('.csv') and f != 'overall_metrics.csv']
+    result_files = [f for f in os.listdir(results_folder) if f.endswith(
+        '.csv') and f != 'overall_metrics.csv']
 
     if not result_files:
         print("No result files found in the results folder.")
@@ -396,7 +398,7 @@ def analyze_scenario_results(base_folder, results_folder, scenario_name):
 
     for file in result_files:
         print(f"\nProcessing file: {file}")
-        
+
         # Parse filename components - improved to handle various formats
         parts = file.replace('.csv', '').split('_')
 
@@ -424,7 +426,8 @@ def analyze_scenario_results(base_folder, results_folder, scenario_name):
 
             # If still no k value found, use a default
             if k is None:
-                print(f"Warning: Couldn't extract k value from filename {file}, using default k=100")
+                print(
+                    f"Warning: Couldn't extract k value from filename {file}, using default k=100")
                 k = 100
 
             print(f"Algorithm: {algorithm}, Metric: {metric}, k: {k}")
@@ -448,7 +451,8 @@ def analyze_scenario_results(base_folder, results_folder, scenario_name):
 
             # Check if this file has the expected structure
             if 'user_id_ext' not in df.columns or 'score' not in df.columns:
-                print(f"Skipping {file} - missing required columns (user_id_ext or score)")
+                print(
+                    f"Skipping {file} - missing required columns (user_id_ext or score)")
                 continue
 
             # Match user with cluster
@@ -474,7 +478,8 @@ def analyze_scenario_results(base_folder, results_folder, scenario_name):
     performance_report = []
 
     # Unique combinations of algorithm, metric, k
-    combinations = combined_df[['algorithm', 'metric', 'k']].drop_duplicates().values
+    combinations = combined_df[['algorithm',
+                                'metric', 'k']].drop_duplicates().values
 
     for algorithm, metric, k in combinations:
         subset = combined_df[(combined_df['algorithm'] == algorithm) &
@@ -499,10 +504,12 @@ def analyze_scenario_results(base_folder, results_folder, scenario_name):
             zero_count = count_zeros(cluster_data['score'])
             zero_prop = proportion_zeros(cluster_data['score'])
             recpack_user_count = len(cluster_data)  # Users in predictions
-            original_user_count = original_cluster_sizes.get(cluster, 0)  # Original users in cluster
+            original_user_count = original_cluster_sizes.get(
+                cluster, 0)  # Original users in cluster
 
             # Calculate coverage ratio
-            coverage_ratio = recpack_user_count / original_user_count if original_user_count > 0 else 0
+            coverage_ratio = recpack_user_count / \
+                original_user_count if original_user_count > 0 else 0
 
             cluster_stats.append({
                 'algorithm': algorithm,
@@ -524,14 +531,16 @@ def analyze_scenario_results(base_folder, results_folder, scenario_name):
 
         # Print summary of this algorithm/metric/k
         print(f"\n=== {algorithm} - {metric} (k={k}) ===")
-        print(cluster_df[['cluster', 'mean', 'zero_proportion', 'coverage_ratio']].sort_values('mean', ascending=False))
+        print(cluster_df[['cluster', 'mean', 'zero_proportion',
+              'coverage_ratio']].sort_values('mean', ascending=False))
 
     # Combine all performance data
     all_performance = pd.concat(performance_report, ignore_index=True)
-    all_performance.to_csv(os.path.join(report_dir, 'all_cluster_performance.csv'), index=False)
+    all_performance.to_csv(os.path.join(
+        report_dir, 'all_cluster_performance.csv'), index=False)
 
     # Create summary visualizations
-    
+
     # 1. General overview of average performance per algorithm per cluster (across all metrics)
     # Group by algorithm and cluster, averaging across metrics and k values
     bundled_performance = all_performance.groupby(['algorithm', 'cluster']).agg({
@@ -542,7 +551,8 @@ def analyze_scenario_results(base_folder, results_folder, scenario_name):
     }).reset_index()
 
     # Calculate overall coverage ratio
-    bundled_performance['coverage_ratio'] = bundled_performance['recpack_user_count'] / bundled_performance['original_user_count']
+    bundled_performance['coverage_ratio'] = bundled_performance['recpack_user_count'] / \
+        bundled_performance['original_user_count']
 
     # Get unique clusters and algorithms for consistent ordering
     clusters = sorted(bundled_performance['cluster'].unique())
@@ -553,12 +563,13 @@ def analyze_scenario_results(base_folder, results_folder, scenario_name):
         'recpack_user_count': 'mean',
         'original_user_count': 'first'
     })
-    cluster_coverage['coverage_ratio'] = cluster_coverage['recpack_user_count'] / cluster_coverage['original_user_count']
+    cluster_coverage['coverage_ratio'] = cluster_coverage['recpack_user_count'] / \
+        cluster_coverage['original_user_count']
     avg_coverage = cluster_coverage['coverage_ratio']
 
     # --- OVERALL PERFORMANCE GRAPH ---
     plt.figure(figsize=(15, 10))
-    
+
     # Set up the plot
     bar_width = 0.8 / len(algorithms)
     opacity = 0.8
@@ -572,7 +583,8 @@ def analyze_scenario_results(base_folder, results_folder, scenario_name):
         values = []
         for cluster in clusters:
             cluster_value = algo_data[algo_data['cluster'] == cluster]['mean']
-            values.append(cluster_value.iloc[0] if len(cluster_value) > 0 else 0)
+            values.append(cluster_value.iloc[0] if len(
+                cluster_value) > 0 else 0)
 
         plt.bar(positions, values, bar_width, alpha=opacity, label=algo)
 
@@ -584,16 +596,19 @@ def analyze_scenario_results(base_folder, results_folder, scenario_name):
 
     plt.xlabel('Cluster (with coverage ratio)')
     plt.ylabel('Average Score')
-    plt.title(f'{scenario_name}: Average Performance by Algorithm Across Clusters (All Metrics)')
-    plt.xticks(np.arange(len(clusters)) + bar_width * (len(algorithms) - 1) / 2, x_tick_labels)
+    plt.title(
+        f'{scenario_name}: Average Performance by Algorithm Across Clusters (All Metrics)')
+    plt.xticks(np.arange(len(clusters)) + bar_width *
+               (len(algorithms) - 1) / 2, x_tick_labels)
     plt.legend()
     plt.tight_layout()
-    plt.savefig(os.path.join(report_dir, 'algorithm_performance_all_metrics.png'))
+    plt.savefig(os.path.join(
+        report_dir, 'algorithm_performance_all_metrics.png'))
     plt.close()
-    
+
     # --- OVERALL ZERO PROPORTION GRAPH ---
     plt.figure(figsize=(15, 10))
-    
+
     # Plot each algorithm's zero proportion across clusters
     for i, algo in enumerate(algorithms):
         algo_data = bundled_performance[bundled_performance['algorithm'] == algo]
@@ -602,23 +617,28 @@ def analyze_scenario_results(base_folder, results_folder, scenario_name):
         # Get zero proportion values for each cluster
         values = []
         for cluster in clusters:
-            cluster_value = algo_data[algo_data['cluster'] == cluster]['zero_proportion']
-            values.append(cluster_value.iloc[0] if len(cluster_value) > 0 else 0)
+            cluster_value = algo_data[algo_data['cluster']
+                                      == cluster]['zero_proportion']
+            values.append(cluster_value.iloc[0] if len(
+                cluster_value) > 0 else 0)
 
         plt.bar(positions, values, bar_width, alpha=opacity, label=algo)
 
     plt.xlabel('Cluster (with coverage ratio)')
     plt.ylabel('Proportion of Zero Scores')
-    plt.title(f'{scenario_name}: Zero Score Proportion by Algorithm Across Clusters (All Metrics)')
-    plt.xticks(np.arange(len(clusters)) + bar_width * (len(algorithms) - 1) / 2, x_tick_labels)
+    plt.title(
+        f'{scenario_name}: Zero Score Proportion by Algorithm Across Clusters (All Metrics)')
+    plt.xticks(np.arange(len(clusters)) + bar_width *
+               (len(algorithms) - 1) / 2, x_tick_labels)
     plt.legend()
     plt.tight_layout()
-    plt.savefig(os.path.join(report_dir, 'algorithm_zero_proportion_all_metrics.png'))
+    plt.savefig(os.path.join(
+        report_dir, 'algorithm_zero_proportion_all_metrics.png'))
     plt.close()
 
     # 2. One overview per metric (bar chart)
     metrics = all_performance['metric'].unique()
-    
+
     for metric in metrics:
         # Filter data for this metric
         metric_data = all_performance[all_performance['metric'] == metric]
@@ -626,68 +646,79 @@ def analyze_scenario_results(base_folder, results_folder, scenario_name):
             'mean': 'mean',
             'zero_proportion': 'mean'
         }).reset_index()
-        
+
         # --- PERFORMANCE GRAPH FOR THIS METRIC ---
         plt.figure(figsize=(15, 10))
-        
+
         # Set up the plot for this metric
         bar_width = 0.8 / len(algorithms)
         opacity = 0.8
-        
+
         # Plot each algorithm's performance across clusters
         for i, algo in enumerate(algorithms):
             algo_data = metric_avg[metric_avg['algorithm'] == algo]
             positions = np.arange(len(clusters)) + (i * bar_width)
-            
+
             # Get values for each cluster
             values = []
             for cluster in clusters:
-                cluster_value = algo_data[algo_data['cluster'] == cluster]['mean']
-                values.append(cluster_value.iloc[0] if len(cluster_value) > 0 else 0)
-            
+                cluster_value = algo_data[algo_data['cluster']
+                                          == cluster]['mean']
+                values.append(cluster_value.iloc[0] if len(
+                    cluster_value) > 0 else 0)
+
             plt.bar(positions, values, bar_width, alpha=opacity, label=algo)
-        
+
         plt.xlabel('Cluster')
         plt.ylabel('Average Score')
-        plt.title(f'{scenario_name}: Average Performance by Algorithm - {metric}')
-        plt.xticks(np.arange(len(clusters)) + bar_width * (len(algorithms) - 1) / 2, clusters)
+        plt.title(
+            f'{scenario_name}: Average Performance by Algorithm - {metric}')
+        plt.xticks(np.arange(len(clusters)) + bar_width *
+                   (len(algorithms) - 1) / 2, clusters)
         plt.legend()
         plt.tight_layout()
-        plt.savefig(os.path.join(report_dir, f'algorithm_performance_{metric}.png'))
+        plt.savefig(os.path.join(
+            report_dir, f'algorithm_performance_{metric}.png'))
         plt.close()
-        
+
         # --- ZERO PROPORTION GRAPH FOR THIS METRIC ---
         plt.figure(figsize=(15, 10))
-        
+
         # Plot each algorithm's zero proportion across clusters
         for i, algo in enumerate(algorithms):
             algo_data = metric_avg[metric_avg['algorithm'] == algo]
             positions = np.arange(len(clusters)) + (i * bar_width)
-            
+
             # Get zero proportion values for each cluster
             values = []
             for cluster in clusters:
-                cluster_value = algo_data[algo_data['cluster'] == cluster]['zero_proportion']
-                values.append(cluster_value.iloc[0] if len(cluster_value) > 0 else 0)
-            
+                cluster_value = algo_data[algo_data['cluster']
+                                          == cluster]['zero_proportion']
+                values.append(cluster_value.iloc[0] if len(
+                    cluster_value) > 0 else 0)
+
             plt.bar(positions, values, bar_width, alpha=opacity, label=algo)
-        
+
         plt.xlabel('Cluster')
         plt.ylabel('Proportion of Zero Scores')
-        plt.title(f'{scenario_name}: Zero Score Proportion by Algorithm - {metric}')
-        plt.xticks(np.arange(len(clusters)) + bar_width * (len(algorithms) - 1) / 2, clusters)
+        plt.title(
+            f'{scenario_name}: Zero Score Proportion by Algorithm - {metric}')
+        plt.xticks(np.arange(len(clusters)) + bar_width *
+                   (len(algorithms) - 1) / 2, clusters)
         plt.legend()
         plt.tight_layout()
-        plt.savefig(os.path.join(report_dir, f'algorithm_zero_proportion_{metric}.png'))
+        plt.savefig(os.path.join(
+            report_dir, f'algorithm_zero_proportion_{metric}.png'))
         plt.close()
-    
+
     # 3. One graph for each K value with NDCGK metric
     # Filter for NDCGK metric
-    ndcgk_data = all_performance[all_performance['metric'].str.contains('NDCGK', case=False)]
-    
+    ndcgk_data = all_performance[all_performance['metric'].str.contains(
+        'NDCGK', case=False)]
+
     # Get unique K values
     k_values = sorted(ndcgk_data['k'].unique())
-    
+
     for k_value in k_values:
         # Filter data for this K value
         k_data = ndcgk_data[ndcgk_data['k'] == k_value]
@@ -695,65 +726,76 @@ def analyze_scenario_results(base_folder, results_folder, scenario_name):
             'mean': 'mean',
             'zero_proportion': 'mean'
         }).reset_index()
-        
+
         # --- PERFORMANCE GRAPH FOR THIS K VALUE ---
         plt.figure(figsize=(15, 10))
-        
+
         # Set up the plot for this K value
         bar_width = 0.8 / len(algorithms)
         opacity = 0.8
-        
+
         # Plot each algorithm's performance across clusters
         for i, algo in enumerate(algorithms):
             algo_data = k_avg[k_avg['algorithm'] == algo]
             positions = np.arange(len(clusters)) + (i * bar_width)
-            
+
             # Get values for each cluster
             values = []
             for cluster in clusters:
-                cluster_value = algo_data[algo_data['cluster'] == cluster]['mean']
-                values.append(cluster_value.iloc[0] if len(cluster_value) > 0 else 0)
-            
+                cluster_value = algo_data[algo_data['cluster']
+                                          == cluster]['mean']
+                values.append(cluster_value.iloc[0] if len(
+                    cluster_value) > 0 else 0)
+
             plt.bar(positions, values, bar_width, alpha=opacity, label=algo)
-        
+
         plt.xlabel('Cluster')
         plt.ylabel('NDCGK Score')
         plt.title(f'{scenario_name}: NDCGK@{k_value} Performance by Algorithm')
-        plt.xticks(np.arange(len(clusters)) + bar_width * (len(algorithms) - 1) / 2, clusters)
+        plt.xticks(np.arange(len(clusters)) + bar_width *
+                   (len(algorithms) - 1) / 2, clusters)
         plt.legend()
         plt.tight_layout()
-        plt.savefig(os.path.join(report_dir, f'algorithm_performance_NDCGK_k{k_value}.png'))
+        plt.savefig(os.path.join(
+            report_dir, f'algorithm_performance_NDCGK_k{k_value}.png'))
         plt.close()
-        
+
         # --- ZERO PROPORTION GRAPH FOR THIS K VALUE ---
         plt.figure(figsize=(15, 10))
-        
+
         # Plot each algorithm's zero proportion across clusters
         for i, algo in enumerate(algorithms):
             algo_data = k_avg[k_avg['algorithm'] == algo]
             positions = np.arange(len(clusters)) + (i * bar_width)
-            
+
             # Get zero proportion values for each cluster
             values = []
             for cluster in clusters:
-                cluster_value = algo_data[algo_data['cluster'] == cluster]['zero_proportion']
-                values.append(cluster_value.iloc[0] if len(cluster_value) > 0 else 0)
-            
+                cluster_value = algo_data[algo_data['cluster']
+                                          == cluster]['zero_proportion']
+                values.append(cluster_value.iloc[0] if len(
+                    cluster_value) > 0 else 0)
+
             plt.bar(positions, values, bar_width, alpha=opacity, label=algo)
-        
+
         plt.xlabel('Cluster')
         plt.ylabel('Proportion of Zero Scores')
-        plt.title(f'{scenario_name}: NDCGK@{k_value} Zero Score Proportion by Algorithm')
-        plt.xticks(np.arange(len(clusters)) + bar_width * (len(algorithms) - 1) / 2, clusters)
+        plt.title(
+            f'{scenario_name}: NDCGK@{k_value} Zero Score Proportion by Algorithm')
+        plt.xticks(np.arange(len(clusters)) + bar_width *
+                   (len(algorithms) - 1) / 2, clusters)
         plt.legend()
         plt.tight_layout()
-        plt.savefig(os.path.join(report_dir, f'algorithm_zero_proportion_NDCGK_k{k_value}.png'))
+        plt.savefig(os.path.join(
+            report_dir, f'algorithm_zero_proportion_NDCGK_k{k_value}.png'))
         plt.close()
 
     # Save summary data
-    bundled_performance.to_csv(os.path.join(report_dir, 'summary_performance.csv'), index=False)
-    
-    print(f"\nAnalysis for scenario {scenario_name} complete. Summary visualizations saved to {report_dir}")
+    bundled_performance.to_csv(os.path.join(
+        report_dir, 'summary_performance.csv'), index=False)
+
+    print(
+        f"\nAnalysis for scenario {scenario_name} complete. Summary visualizations saved to {report_dir}")
 
 
 def main():
@@ -761,15 +803,15 @@ def main():
     if len(sys.argv) < 2:
         print("Usage: python 1.pipeline.py <folder path>")
         sys.exit(1)
-        
+
     folder = sys.argv[1]
     print(f"Processing {folder}")
-    
+
     # Ensure the input folder exists
     if not os.path.exists(folder):
         print(f"Error: Input folder '{folder}' does not exist.")
         sys.exit(1)
-        
+
     base_output_folder = f'{folder}/2.output.recpack_results'
 
     # Create base output directory if it doesn't exist
@@ -800,6 +842,7 @@ def main():
             t_validation=t_validation,
             validation=True
         ),
+        # Same data split as WeakGen?
         LastItemPrediction(
             validation=True,
             n_most_recent_in=30
@@ -810,14 +853,14 @@ def main():
     for scenario in SCENARIOS:
         scenario_name, metrics, all_metrics = run_pipeline_for_scenario(
             scenario, interaction_matrix, content_dict, proc)
-        
+
         # Create scenario-specific output folder
         scenario_output_folder = f'{base_output_folder}/{scenario_name}'
         ensure_dir_exists(scenario_output_folder)
-        
+
         # Process and save results for this scenario
         process_results(proc, metrics, all_metrics, scenario_output_folder)
-        
+
         # Analyze the scenario results
         analyze_scenario_results(folder, scenario_output_folder, scenario_name)
 

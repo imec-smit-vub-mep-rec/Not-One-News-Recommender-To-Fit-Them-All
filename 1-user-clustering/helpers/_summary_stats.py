@@ -3,7 +3,7 @@ import os
 from tabulate import tabulate
 
 # Paths to datasets
-ADDRESSA_PATH = os.path.join(
+adressa_PATH = os.path.join(
     '..', '1-user-clustering', 'datasets', 'adressa-large-0416')
 EKSTRA_PATH = os.path.join('..', '1-user-clustering',
                            'datasets', 'ekstra-large')
@@ -54,19 +54,19 @@ def calculate_stats(dataset_path, dataset_name, remove_empty_articles=False):
 
 def main():
     """Main function to calculate and display statistics for both datasets."""
-    print("Calculating summary statistics for addressa and ekstra datasets...\n")
+    print("Calculating summary statistics for adressa and ekstra datasets...\n")
 
     # Calculate statistics for both datasets
-    addressa_stats = calculate_stats(ADDRESSA_PATH, 'Adressa (with homepage)')
-    addressa_stats_no_homepage = calculate_stats(
-        ADDRESSA_PATH, 'Adressa (no homepage)', remove_empty_articles=True)
+    adressa_stats = calculate_stats(adressa_PATH, 'Adressa (with homepage)')
+    adressa_stats_no_homepage = calculate_stats(
+        adressa_PATH, 'Adressa (no homepage)', remove_empty_articles=True)
     ekstra_stats = calculate_stats(EKSTRA_PATH, 'Ekstra')
     ekstra_stats_no_homepage = calculate_stats(
         EKSTRA_PATH, 'Ekstra (no homepage)', remove_empty_articles=True)
 
     # Convert stats to a tabular format
-    headers = list(addressa_stats.keys())
-    rows = [list(addressa_stats.values()), list(addressa_stats_no_homepage.values(
+    headers = list(adressa_stats.keys())
+    rows = [list(adressa_stats.values()), list(adressa_stats_no_homepage.values(
     )), list(ekstra_stats.values()), list(ekstra_stats_no_homepage.values())]
 
     # Display results in a table

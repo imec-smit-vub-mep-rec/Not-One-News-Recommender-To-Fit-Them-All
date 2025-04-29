@@ -1,5 +1,5 @@
 """
-Example of a line in the addressa dataset:
+Example of a line in the adressa dataset:
  {
     "profile": [
       {
@@ -113,7 +113,7 @@ Example of a line in the addressa dataset:
   }
 """
 
-# 1. Load the addressa dataset (1 jsonl file per day, 7 files)
+# 1. Load the adressa dataset (1 jsonl file per day, 7 files)
 # 2. Turn them into one continuous jsonl file
 # 3. Group by userId
 # -> Initialize a new dataframe 'users' to store the users, with the following columns:
@@ -169,12 +169,12 @@ def extract_category_from_url(url: str) -> str:
     return match.group(1) if match else ''
 
 
-def process_addressa_data(input_dir: str, output_dir: str):
+def process_adressa_data(input_dir: str, output_dir: str):
     """
-    Process Addressa dataset and convert it to the required format.
+    Process adressa dataset and convert it to the required format.
 
     Args:
-        input_dir: Directory containing Addressa JSONL files
+        input_dir: Directory containing adressa JSONL files
         output_dir: Directory to save output parquet files
     """
     # Initialize dataframes with optimized dtypes
@@ -488,8 +488,8 @@ def extract_user_data(input_dir: str, output_dir: str, user_id: str):
 
 
 if __name__ == '__main__':
-    # Directory containing Addressa JSONL files
-    input_dir = 'addressa/datasets/one_week'
+    # Directory containing adressa JSONL files
+    input_dir = 'adressa/datasets/one_week'
     # Directory to save output parquet files
-    output_dir = 'addressa/datasets/one_week/converted'
-    process_addressa_data(input_dir, output_dir)
+    output_dir = 'adressa/datasets/one_week/converted'
+    process_adressa_data(input_dir, output_dir)
