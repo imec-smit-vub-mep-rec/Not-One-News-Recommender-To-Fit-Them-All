@@ -41,7 +41,7 @@ def load_data() -> Tuple[pd.DataFrame, pd.DataFrame]:
 
     # Merge behaviors with articles to get topic information only for rows with article_id
     merged_with_articles = behaviors_with_article.merge(
-        articles_df[['article_id', 'category_str', 'sentiment_score']],
+        articles_df[['article_id', 'category_str']],
         on='article_id',
         how='left'
     )
@@ -61,7 +61,6 @@ def load_data() -> Tuple[pd.DataFrame, pd.DataFrame]:
 # Create a csv table per article_id, with the following columns:
 # - article_id
 # - category_str
-# - sentiment_score
 # - count of impressions (based on behaviors.parquet)
 # - count of unique categories (based on behaviors.parquet)
 # - count of unique users that accessed this article (based on behaviors.parquet)
@@ -73,7 +72,6 @@ def create_article_table(merged_df: pd.DataFrame, articles_df: pd.DataFrame) -> 
     """Create a csv table per article_id, with the following columns:
     - article_id
     - category_str
-    - sentiment_score
     - count of impressions (based on behaviors.parquet)
     - count of unique categories (based on behaviors.parquet)
     - count of unique users that accessed this article (based on behaviors.parquet)
@@ -88,9 +86,9 @@ def create_article_table(merged_df: pd.DataFrame, articles_df: pd.DataFrame) -> 
         # avg_scroll_depth=('scroll_percentage', 'mean') - not accurate
     ).reset_index()
 
-    # Merge with articles_df to get category_str and sentiment_score
+    # Merge with articles_df to get category_str
     article_table = article_table.merge(
-        articles_df[['article_id', 'category_str', 'sentiment_score']],
+        articles_df[['article_id', 'category_str']],
         on='article_id',
         how='left'
     )
