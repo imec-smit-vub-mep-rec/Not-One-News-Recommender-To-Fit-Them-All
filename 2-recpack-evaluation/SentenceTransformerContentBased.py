@@ -5,6 +5,7 @@ from annoy import AnnoyIndex
 from recpack.algorithms.base import Algorithm
 from scipy.sparse import lil_matrix, csr_matrix
 from sentence_transformers import SentenceTransformer
+import sys
 
 
 class SentenceTransformerContentBased(Algorithm):
@@ -35,6 +36,7 @@ class SentenceTransformerContentBased(Algorithm):
                  embedding_dim: int | None = None, n_trees: int = 10, num_neighbors: int = 100,
                  verbose: bool = False):
         super().__init__()  # Initialize the base Algorithm class
+        print(f"DEBUG: SentenceTransformerContentBased initialized with language={language}", flush=True)
 
         # Store parameters directly as public attributes for get_params()
         self.content = content
@@ -47,7 +49,9 @@ class SentenceTransformerContentBased(Algorithm):
         self.verbose = verbose
 
         # Initialize SentenceTransformer
+        print("DEBUG: Loading SentenceTransformer model...", flush=True)
         self.sentencetransformer = SentenceTransformer(self.language)
+        print("DEBUG: SentenceTransformer model loaded.", flush=True)
 
         # Infer actual embedding dimension if not provided
         if self.embedding_dim is None:
@@ -57,6 +61,8 @@ class SentenceTransformerContentBased(Algorithm):
             self._embedding_dim = dummy_embedding.shape[0]
         else:
             self._embedding_dim = self.embedding_dim  # Internal actual dimension
+        
+        print(f"DEBUG: Embedding dim: {self._embedding_dim}", flush=True)
 
         # Initialize Annoy index
         self.annoy_index = AnnoyIndex(self._embedding_dim, self.metric)
@@ -74,8 +80,10 @@ class SentenceTransformerContentBased(Algorithm):
         """Print log message only if verbose mode is enabled"""
         if self.verbose:
             print(msg, *args, **kwargs)
+            sys.stdout.flush()
 
     def _fit(self, X: csr_matrix):
+        print("DEBUG: Starting _fit method", flush=True)
         num_U, num_I = X.shape
         # Ensure user IDs are distinct from item IDs using the public attribute
         self._user_offset = num_I + 100
@@ -101,6 +109,7 @@ class SentenceTransformerContentBased(Algorithm):
 
         # 2. Batch encode item content
         self._log("  Batch encoding item content...")
+        print(f"DEBUG: Encoding {len(content_texts)} items...", flush=True)
         if content_texts:
             # Disable progress bar in non-verbose mode
             item_embeddings_array = self.sentencetransformer.encode(
@@ -114,9 +123,12 @@ class SentenceTransformerContentBased(Algorithm):
             item_embeddings_dict = {}
             self._item_embeddings = {}
             self._log("    No item content found to encode.")
+        
+        print(f"DEBUG: Encoding complete. Item embeddings dict size: {len(self._item_embeddings)}", flush=True)
 
         # 3. Add items with embeddings to Annoy index
         self._log("  Adding items to Annoy index...")
+        print("DEBUG: Adding items to Annoy...", flush=True)
         items_added_to_annoy = 0
         # Reset Annoy index before adding items to ensure consistency
         self.annoy_index = AnnoyIndex(self._embedding_dim, self.metric)
@@ -137,7 +149,9 @@ class SentenceTransformerContentBased(Algorithm):
 
         # 5. Build the Annoy index
         self._log("  Building Annoy index...")
+        print("DEBUG: Building Annoy index (this might take time)...", flush=True)
         self.annoy_index.build(self.n_trees)
+        print("DEBUG: Annoy index built.", flush=True)
 
         # Add attributes expected by check_is_fitted
         self.n_features_in_ = num_I
@@ -145,8 +159,10 @@ class SentenceTransformerContentBased(Algorithm):
         self.n_items_ = num_I
 
         self._log("  Fit complete.")
+        print("DEBUG: _fit complete", flush=True)
 
     def _predict(self, X: csr_matrix):
+        print("DEBUG: Starting _predict method", flush=True)
         num_U, num_I = X.shape
         # Removed check for self._user_offset as it's no longer used
         # if self._user_offset is None:

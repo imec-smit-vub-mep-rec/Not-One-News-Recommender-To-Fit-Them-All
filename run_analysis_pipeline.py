@@ -179,7 +179,9 @@ def run_recpack_pipeline(output_dir):
             print(line, end='') # Stream output to console
             
     if p.returncode != 0:
-        logger.error("RecPack pipeline failed.")
+        logger.error(f"RecPack pipeline failed with return code: {p.returncode}")
+        if p.returncode < 0:
+             logger.error(f"Process killed by signal {-p.returncode} (e.g. 9=SIGKILL/OOM, 11=SIGSEGV)")
         sys.exit(1)
     
     logger.info("✓ RecPack Evaluation complete.")
