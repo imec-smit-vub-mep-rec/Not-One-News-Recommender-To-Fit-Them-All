@@ -14,3 +14,6 @@ python run_analysis_pipeline.py --input-dir datasets/ekstra-small --output-dir o
 
 # Datasets
 * EB-NERD: https://docs.google.com/forms/d/e/1FAIpQLSdo6YZ1mVewLmqhsqqOjXTKsSp3OmCMHbMjEpsW0t_j-Hjtbg/formResponse
+
+
+wget -O datasets/adressa-large 
