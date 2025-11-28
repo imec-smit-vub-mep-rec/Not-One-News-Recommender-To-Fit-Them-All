@@ -186,40 +186,87 @@ def run_recpack_pipeline(output_dir):
 
 def main():
     parser = argparse.ArgumentParser(description="Run complete RICON analysis pipeline.")
-    parser.add_argument("--input-dir", required=True, help="Directory containing behaviors.parquet and articles.parquet")
-    parser.add_argument("--output-dir", required=True, help="Directory to store all results")
+    parser.add_argument("--input-dir", help="Directory containing behaviors.parquet and articles.parquet (Optional if --s3-folder is provided)")
+    parser.add_argument("--s3-folder", help="S3 folder URI (e.g., s3://my-bucket/data) containing inputs. If set, inputs are read from here and results are uploaded back.")
+    parser.add_argument("--output-dir", required=True, help="Local directory to store temporary results and final outputs")
     
     args = parser.parse_args()
     
+    if not args.input_dir and not args.s3_folder:
+        parser.error("Either --input-dir or --s3-folder must be provided.")
+
     start_time = datetime.now()
     logger.info(f"Starting pipeline at {start_time}")
-    logger.info(f"Input: {args.input_dir}")
-    logger.info(f"Output: {args.output_dir}")
+    
+    # Define Input Paths
+    if args.s3_folder:
+        # Ensure no trailing slash for consistency
+        s3_base = args.s3_folder.rstrip('/')
+        behaviors_file = f"{s3_base}/behaviors.parquet"
+        articles_file = f"{s3_base}/articles.parquet"
+        logger.info(f"Input (S3): {s3_base}")
+    else:
+        behaviors_file = os.path.join(args.input_dir, "behaviors.parquet")
+        articles_file = os.path.join(args.input_dir, "articles.parquet")
+        logger.info(f"Input (Local): {args.input_dir}")
+
+    logger.info(f"Output (Local): {args.output_dir}")
     
     # 0. Checks
-    behaviors_file = os.path.join(args.input_dir, "behaviors.parquet")
-    articles_file = os.path.join(args.input_dir, "articles.parquet")
-    
-    if not os.path.exists(behaviors_file) or not os.path.exists(articles_file):
-        logger.error(f"Missing input files. Ensure 'behaviors.parquet' and 'articles.parquet' exist in {args.input_dir}")
+    def check_exists(path):
+        if path.startswith("s3://"):
+            try:
+                import s3fs
+                fs = s3fs.S3FileSystem()
+                return fs.exists(path)
+            except ImportError:
+                logger.error("s3fs not installed. Run 'pip install s3fs'")
+                sys.exit(1)
+            except Exception as e:
+                logger.error(f"Error checking S3 path {path}: {e}")
+                return False
+        return os.path.exists(path)
+
+    if not check_exists(behaviors_file) or not check_exists(articles_file):
+        logger.error(f"Missing input files. Ensure 'behaviors.parquet' and 'articles.parquet' exist at {behaviors_file} and {articles_file}")
         sys.exit(1)
 
     # 1. Setup
     setup_directories(args.output_dir)
     
     # 2. Preprocessing
+    # Reads from S3/Local -> Writes to Local output_dir
     generate_interactions(behaviors_file, args.output_dir)
     generate_content(articles_file, args.output_dir)
     
     # 3. Clustering
+    # Reads from S3/Local -> Writes to Local output_dir
     run_clustering_logic(behaviors_file, articles_file, args.output_dir)
     
     # 4. Evaluation
+    # Runs on Local output_dir
     run_recpack_pipeline(args.output_dir)
+    
+    # 5. Upload Results if S3
+    if args.s3_folder:
+        logger.info("STEP 5: Uploading results to S3...")
+        try:
+            import s3fs
+            fs = s3fs.S3FileSystem()
+            # Define remote output path
+            s3_output_path = f"{s3_base}/pipeline_output"
+            logger.info(f"Uploading {args.output_dir} to {s3_output_path}...")
+            fs.put(args.output_dir, s3_output_path, recursive=True)
+            logger.info("✓ Upload complete.")
+        except Exception as e:
+            logger.error(f"Failed to upload results to S3: {e}")
     
     duration = datetime.now() - start_time
     logger.info(f"Pipeline completed successfully in {duration}.")
-    logger.info(f"Results available in: {args.output_dir}/results")
+    if args.s3_folder:
+         logger.info(f"Results available in S3: {s3_base}/pipeline_output")
+    else:
+         logger.info(f"Results available in: {args.output_dir}/results")
 
 if __name__ == "__main__":
     main()

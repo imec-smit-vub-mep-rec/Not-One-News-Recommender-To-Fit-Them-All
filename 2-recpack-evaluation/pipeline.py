@@ -163,6 +163,14 @@ def prepare_data(cluster_file, articles_content_path):
     print(f"Loaded content for {article_count} articles")
 
     # Calculate timestamps for splits (needed for Timed scenario)
+    # Convert impression_time to numeric timestamp if it's not already
+    if not pd.api.types.is_numeric_dtype(df['impression_time']):
+        # Try to parse as datetime and convert to Unix timestamp (seconds)
+        df['impression_time'] = pd.to_datetime(df['impression_time']).astype(np.int64) // 10**9
+    elif df['impression_time'].max() > 1e12:
+        # If it's numeric but in milliseconds, convert to seconds
+        df['impression_time'] = df['impression_time'] // 1000
+    
     t_validation = df['impression_time'].quantile(0.71)
     t_test = df['impression_time'].quantile(0.86)
 
