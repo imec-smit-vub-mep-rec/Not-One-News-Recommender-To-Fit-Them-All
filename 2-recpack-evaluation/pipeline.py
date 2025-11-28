@@ -51,12 +51,14 @@ def run_pipeline_for_scenario(scenario, interaction_matrix, content_dict, proc):
         builder.set_data_from_scenario(scenario)
 
         builder.add_algorithm('Popularity')
+        # Using a smaller model to prevent OOM errors
+        # 'intfloat/multilingual-e5-large' was causing OOM (Signal 9)
         builder.add_algorithm('SentenceTransformerContentBased', params={
             'content': content_dict,
-            'language': 'intfloat/multilingual-e5-large',
+            'language': 'all-MiniLM-L6-v2', # Smaller model (~80MB vs ~2.5GB)
             'metric': 'angular',
-            'embedding_dim': 1024,
-            'n_trees': 20,
+            # 'embedding_dim': 1024, # Removed to let it use model default (384)
+            'n_trees': 10, # Reduced from 20 to save memory
             'num_neighbors': 100,
             'verbose': True,
         })
@@ -121,6 +123,22 @@ def prepare_data(cluster_file, articles_content_path):
     df = df[df['user_id'].notna()]
     # Only keep interactions where impression_time is not null
     df = df[df['impression_time'].notna()]
+
+    # Convert impression_time to numeric timestamp if it's not already
+    # This MUST happen before creating the interaction matrix
+    try:
+        if not pd.api.types.is_numeric_dtype(df['impression_time']):
+            # Try to parse as datetime and convert to Unix timestamp (seconds)
+            df['impression_time'] = pd.to_datetime(df['impression_time']).astype(np.int64) // 10**9
+        elif len(df) > 0 and df['impression_time'].max() > 1e12:
+            # If it's numeric but in milliseconds, convert to seconds
+            df['impression_time'] = df['impression_time'] // 1000
+    except Exception as e:
+        print(f"Error converting timestamps: {e}")
+        print(f"impression_time dtype: {df['impression_time'].dtype}")
+        print(f"impression_time sample: {df['impression_time'].head()}")
+        raise
+
     print(f"Processing {os.path.basename(cluster_file)}")
     print(
         f"Only keeping interactions where article_id is not null. Number of removed rows: {len(df_original) - len(df)}")
@@ -184,22 +202,8 @@ def prepare_data(cluster_file, articles_content_path):
     print(f"Loaded content for {article_count} articles")
 
     # Calculate timestamps for splits (needed for Timed scenario)
-    # Convert impression_time to numeric timestamp if it's not already
-    try:
-        if not pd.api.types.is_numeric_dtype(df['impression_time']):
-            # Try to parse as datetime and convert to Unix timestamp (seconds)
-            df['impression_time'] = pd.to_datetime(df['impression_time']).astype(np.int64) // 10**9
-        elif len(df) > 0 and df['impression_time'].max() > 1e12:
-            # If it's numeric but in milliseconds, convert to seconds
-            df['impression_time'] = df['impression_time'] // 1000
-        
-        t_validation = df['impression_time'].quantile(0.71)
-        t_test = df['impression_time'].quantile(0.86)
-    except Exception as e:
-        print(f"Error converting timestamps: {e}")
-        print(f"impression_time dtype: {df['impression_time'].dtype}")
-        print(f"impression_time sample: {df['impression_time'].head()}")
-        raise
+    t_validation = df['impression_time'].quantile(0.71)
+    t_test = df['impression_time'].quantile(0.86)
 
     return proc, interaction_matrix, content_dict, t_validation, t_test
 
