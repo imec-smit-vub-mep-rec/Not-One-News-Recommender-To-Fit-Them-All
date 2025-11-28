@@ -74,16 +74,31 @@ def run_pipeline_for_scenario(scenario, interaction_matrix, content_dict, proc):
         # builder.add_metric('CoverageK', K=[10, 20])
 
         # Build and run pipeline
+        print(f"Building pipeline for {scenario_name}...", flush=True)
         pipeline = builder.build()
-        pipeline.run()
+        print(f"Running pipeline for {scenario_name}...", flush=True)
+        try:
+            pipeline.run()
+        except Exception as run_error:
+            print(f"\nERROR during pipeline.run() for {scenario_name}:", file=sys.stderr, flush=True)
+            print(f"Exception type: {type(run_error).__name__}", file=sys.stderr, flush=True)
+            print(f"Exception message: {str(run_error)}", file=sys.stderr, flush=True)
+            import traceback
+            traceback.print_exc(file=sys.stderr)
+            sys.stderr.flush()
+            raise
 
+        print(f"Pipeline completed for {scenario_name}, getting metrics...", flush=True)
         # Get metrics and return results
         metrics = pipeline.get_metrics()
         return scenario_name, metrics, pipeline._metric_acc.acc
     except Exception as e:
-        print(f"\nERROR in scenario {scenario_name}:")
+        print(f"\nERROR in scenario {scenario_name}:", file=sys.stderr, flush=True)
+        print(f"Exception type: {type(e).__name__}", file=sys.stderr, flush=True)
+        print(f"Exception message: {str(e)}", file=sys.stderr, flush=True)
         import traceback
-        traceback.print_exc()
+        traceback.print_exc(file=sys.stderr)
+        sys.stderr.flush()
         raise
 
 
@@ -885,11 +900,23 @@ def main():
             # Analyze the scenario results
             analyze_scenario_results(folder, scenario_output_folder, scenario_name)
         except Exception as e:
-            print(f"\nFATAL ERROR processing scenario {scenario.__class__.__name__}:")
+            print(f"\nFATAL ERROR processing scenario {scenario.__class__.__name__}:", file=sys.stderr, flush=True)
+            print(f"Exception type: {type(e).__name__}", file=sys.stderr, flush=True)
+            print(f"Exception message: {str(e)}", file=sys.stderr, flush=True)
             import traceback
-            traceback.print_exc()
+            traceback.print_exc(file=sys.stderr)
+            sys.stderr.flush()
             sys.exit(1)
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        print(f"\nUNHANDLED EXCEPTION in main():", file=sys.stderr, flush=True)
+        print(f"Exception type: {type(e).__name__}", file=sys.stderr, flush=True)
+        print(f"Exception message: {str(e)}", file=sys.stderr, flush=True)
+        import traceback
+        traceback.print_exc(file=sys.stderr)
+        sys.stderr.flush()
+        sys.exit(1)
