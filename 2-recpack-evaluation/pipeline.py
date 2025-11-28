@@ -43,42 +43,48 @@ def run_pipeline_for_scenario(scenario, interaction_matrix, content_dict, proc):
     scenario_name = scenario.__class__.__name__
     print(f"\nRunning scenario: {scenario_name}")
 
-    scenario.split(interaction_matrix)
+    try:
+        scenario.split(interaction_matrix)
 
-    # Set up pipeline
-    builder = PipelineBuilder()
-    builder.set_data_from_scenario(scenario)
+        # Set up pipeline
+        builder = PipelineBuilder()
+        builder.set_data_from_scenario(scenario)
 
-    builder.add_algorithm('Popularity')
-    builder.add_algorithm('SentenceTransformerContentBased', params={
-        'content': content_dict,
-        'language': 'intfloat/multilingual-e5-large',
-        'metric': 'angular',
-        'embedding_dim': 1024,
-        'n_trees': 20,
-        'num_neighbors': 100,
-        'verbose': True,
-    })
-    builder.add_algorithm('ItemKNN', grid={
-        'K': [50, 100, 200],
-        'normalize_sim': [True, False],
-        'normalize_X': [True, False]
-    })
-    builder.add_algorithm('EASE', grid={
-        'l2': [1, 10, 100, 1000],
-    })
+        builder.add_algorithm('Popularity')
+        builder.add_algorithm('SentenceTransformerContentBased', params={
+            'content': content_dict,
+            'language': 'intfloat/multilingual-e5-large',
+            'metric': 'angular',
+            'embedding_dim': 1024,
+            'n_trees': 20,
+            'num_neighbors': 100,
+            'verbose': True,
+        })
+        builder.add_algorithm('ItemKNN', grid={
+            'K': [50, 100, 200],
+            'normalize_sim': [True, False],
+            'normalize_X': [True, False]
+        })
+        builder.add_algorithm('EASE', grid={
+            'l2': [1, 10, 100, 1000],
+        })
 
-    builder.set_optimisation_metric('NDCGK', K=100)
-    builder.add_metric('NDCGK', K=[10, 20, 50])
-    # builder.add_metric('CoverageK', K=[10, 20])
+        builder.set_optimisation_metric('NDCGK', K=100)
+        builder.add_metric('NDCGK', K=[10, 20, 50])
+        # builder.add_metric('CoverageK', K=[10, 20])
 
-    # Build and run pipeline
-    pipeline = builder.build()
-    pipeline.run()
+        # Build and run pipeline
+        pipeline = builder.build()
+        pipeline.run()
 
-    # Get metrics and return results
-    metrics = pipeline.get_metrics()
-    return scenario_name, metrics, pipeline._metric_acc.acc
+        # Get metrics and return results
+        metrics = pipeline.get_metrics()
+        return scenario_name, metrics, pipeline._metric_acc.acc
+    except Exception as e:
+        print(f"\nERROR in scenario {scenario_name}:")
+        import traceback
+        traceback.print_exc()
+        raise
 
 
 def prepare_data(cluster_file, articles_content_path):
@@ -164,15 +170,21 @@ def prepare_data(cluster_file, articles_content_path):
 
     # Calculate timestamps for splits (needed for Timed scenario)
     # Convert impression_time to numeric timestamp if it's not already
-    if not pd.api.types.is_numeric_dtype(df['impression_time']):
-        # Try to parse as datetime and convert to Unix timestamp (seconds)
-        df['impression_time'] = pd.to_datetime(df['impression_time']).astype(np.int64) // 10**9
-    elif df['impression_time'].max() > 1e12:
-        # If it's numeric but in milliseconds, convert to seconds
-        df['impression_time'] = df['impression_time'] // 1000
-    
-    t_validation = df['impression_time'].quantile(0.71)
-    t_test = df['impression_time'].quantile(0.86)
+    try:
+        if not pd.api.types.is_numeric_dtype(df['impression_time']):
+            # Try to parse as datetime and convert to Unix timestamp (seconds)
+            df['impression_time'] = pd.to_datetime(df['impression_time']).astype(np.int64) // 10**9
+        elif len(df) > 0 and df['impression_time'].max() > 1e12:
+            # If it's numeric but in milliseconds, convert to seconds
+            df['impression_time'] = df['impression_time'] // 1000
+        
+        t_validation = df['impression_time'].quantile(0.71)
+        t_test = df['impression_time'].quantile(0.86)
+    except Exception as e:
+        print(f"Error converting timestamps: {e}")
+        print(f"impression_time dtype: {df['impression_time'].dtype}")
+        print(f"impression_time sample: {df['impression_time'].head()}")
+        raise
 
     return proc, interaction_matrix, content_dict, t_validation, t_test
 
@@ -859,18 +871,24 @@ def main():
 
     # Run each scenario separately and save results to scenario-specific subfolder
     for scenario in SCENARIOS:
-        scenario_name, metrics, all_metrics = run_pipeline_for_scenario(
-            scenario, interaction_matrix, content_dict, proc)
+        try:
+            scenario_name, metrics, all_metrics = run_pipeline_for_scenario(
+                scenario, interaction_matrix, content_dict, proc)
 
-        # Create scenario-specific output folder
-        scenario_output_folder = f'{base_output_folder}/{scenario_name}'
-        ensure_dir_exists(scenario_output_folder)
+            # Create scenario-specific output folder
+            scenario_output_folder = f'{base_output_folder}/{scenario_name}'
+            ensure_dir_exists(scenario_output_folder)
 
-        # Process and save results for this scenario
-        process_results(proc, metrics, all_metrics, scenario_output_folder)
+            # Process and save results for this scenario
+            process_results(proc, metrics, all_metrics, scenario_output_folder)
 
-        # Analyze the scenario results
-        analyze_scenario_results(folder, scenario_output_folder, scenario_name)
+            # Analyze the scenario results
+            analyze_scenario_results(folder, scenario_output_folder, scenario_name)
+        except Exception as e:
+            print(f"\nFATAL ERROR processing scenario {scenario.__class__.__name__}:")
+            import traceback
+            traceback.print_exc()
+            sys.exit(1)
 
 
 if __name__ == "__main__":
