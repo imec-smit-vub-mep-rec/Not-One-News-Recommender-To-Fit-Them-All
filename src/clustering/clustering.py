@@ -5,15 +5,11 @@ Provides K-Means clustering and utilities for finding optimal cluster count.
 """
 
 from typing import Dict, List, Optional, Tuple, Any
-import os
 import pandas as pd
 import numpy as np
 from sklearn.cluster import KMeans, MiniBatchKMeans
 from sklearn.metrics import silhouette_score, calinski_harabasz_score, davies_bouldin_score
 import warnings
-
-# Auto-detect optimal number of jobs for parallel processing
-N_JOBS = int(os.environ.get('SKLEARN_N_JOBS', -1))  # -1 = use all CPUs
 
 from ..utils.logging import get_logger
 
@@ -53,8 +49,8 @@ def find_optimal_k(
     for k in k_range:
         logger.info(f"Evaluating k={k}...")
         
-        # Fit k-means with parallel processing
-        kmeans = KMeans(n_clusters=k, random_state=random_state, n_init=n_init, n_jobs=N_JOBS)
+        # Fit k-means
+        kmeans = KMeans(n_clusters=k, random_state=random_state, n_init=n_init)
         labels = kmeans.fit_predict(X)
         
         # Compute metrics
@@ -169,7 +165,6 @@ def cluster_users(
             n_clusters=n_clusters,
             random_state=random_state,
             n_init=n_init,
-            n_jobs=N_JOBS,  # Parallel processing for SageMaker
         )
     
     labels = model.fit_predict(X)

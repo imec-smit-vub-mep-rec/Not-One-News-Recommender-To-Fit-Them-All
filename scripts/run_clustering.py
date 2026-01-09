@@ -90,6 +90,12 @@ def parse_args():
     )
     
     parser.add_argument(
+        "--no-homepage",
+        action="store_true",
+        help="Exclude homepage behavior features (not recommended - these are important clustering signals)",
+    )
+    
+    parser.add_argument(
         "--seed",
         type=int,
         default=42,
@@ -130,13 +136,14 @@ def main():
         articles_df = load_dataframe(args.articles)
         logger.info(f"Loaded {len(articles_df)} articles")
     
-    # Extract features
+    # Extract features (including homepage behavior by default - matching legacy clustering)
     logger.info("Extracting user features...")
     extractor = UserFeatureExtractor(
         include_categories=not args.no_categories,
         include_time=not args.no_time,
         include_activity=True,
         include_diversity=True,
+        include_homepage=not args.no_homepage,  # Homepage behavior is a clustering signal
         scale=True,
     )
     

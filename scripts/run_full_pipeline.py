@@ -183,15 +183,18 @@ def run_preprocessing(
 ) -> tuple:
     """Run preprocessing step for CLUSTERING.
     
-    IMPORTANT: This preprocessing does NOT filter users by impression count.
-    Clustering must happen on ALL users. User filtering is only applied
-    later during the RecPack evaluation step.
+    IMPORTANT: This preprocessing matches the legacy behavior:
+    1. NO user filtering - clustering happens on ALL users
+    2. NO removal of homepage views - homepage behavior is a clustering signal!
+       Users who only visit homepage are a distinct behavioral cluster.
+    3. interactions.csv (for RecPack) is created separately and only includes
+       rows with valid article_id. RecPack's MinItemsPerUser filter is applied there.
     
     Returns:
         Tuple of (cleaned_articles, cleaned_impressions, interactions)
     """
     logger.info("=" * 60)
-    logger.info("STEP 2: Preprocessing (for clustering - NO user filtering)")
+    logger.info("STEP 2: Preprocessing (for clustering)")
     logger.info("=" * 60)
     
     # Validate data
@@ -205,11 +208,13 @@ def run_preprocessing(
     if not is_valid:
         logger.warning("Validation found issues, proceeding with cleaning")
     
-    # Clean data for CLUSTERING - NO user filtering!
-    # User filtering only happens in RecPack evaluation.
+    # Clean data for CLUSTERING - matching legacy behavior:
+    # - NO user filtering (filter_users=False)
+    # - NO removal of homepage views (remove_empty_articles=False)
+    # Homepage behavior is a meaningful clustering signal!
     cleaner = DataCleaner(
         min_impressions_per_user=config.clustering.min_impressions_per_user,
-        remove_empty_articles=True,
+        remove_empty_articles=False,  # CRITICAL: Keep homepage views for clustering
         clean_categories=True,
         filter_users=False,  # CRITICAL: Do NOT filter users before clustering
     )
@@ -218,18 +223,21 @@ def run_preprocessing(
     cleaned_impressions = cleaner.clean_impressions(impressions_df, cleaned_articles)
     
     logger.info(f"Cleaning stats: {cleaner.get_stats()}")
-    logger.info(f"NOTE: All {cleaner.get_stats().get('final_users', 'N/A')} users retained for clustering")
+    logger.info(f"NOTE: All {cleaner.get_stats().get('final_users', 'N/A')} users retained for clustering (including homepage-only users)")
     
-    # Save cleaned data
+    # Save cleaned data (includes homepage views)
     save_dataframe(cleaned_articles, session.get_path("articles_cleaned.parquet"))
     save_dataframe(cleaned_impressions, session.get_path("impressions_cleaned.parquet"))
     
-    # Create interactions for RecPack (from ALL users - filtering happens in RecPack)
+    # Create interactions for RecPack - this ONLY includes article interactions
+    # (behaviors_to_interactions filters out rows without valid article_id)
+    # User filtering (min_items_per_user) happens later in RecPack
     interactions_df = behaviors_to_interactions(cleaned_impressions)
     
     interactions_path = session.get_path("interactions.csv")
     save_dataframe(interactions_df, interactions_path, format="csv")
-    logger.info(f"Saved {len(interactions_df)} interactions to {interactions_path}")
+    logger.info(f"Saved {len(interactions_df)} article interactions to {interactions_path}")
+    logger.info(f"NOTE: interactions.csv excludes homepage views (for RecPack evaluation)")
     
     # Create article content for content-based
     content_df = articles_to_content(cleaned_articles)
@@ -247,21 +255,26 @@ def run_clustering(
     config: PipelineConfig,
     session: Session,
 ) -> tuple:
-    """Run clustering step.
+    """Run clustering step on ALL users.
+    
+    IMPORTANT: This runs on ALL users including homepage-only users.
+    The impressions_df should include homepage views (article_id is null)
+    as this is an important clustering signal from the legacy code.
     
     Returns:
         Tuple of (features_df, labels, cluster_info)
     """
     logger.info("=" * 60)
-    logger.info("STEP 3: User Clustering")
+    logger.info("STEP 3: User Clustering (ALL users including homepage-only)")
     logger.info("=" * 60)
     
-    # Extract features
+    # Extract features (including homepage behavior - matching legacy clustering)
     extractor = UserFeatureExtractor(
         include_categories=True,
         include_time=True,
         include_activity=True,
         include_diversity=True,
+        include_homepage=True,  # Homepage behavior is a clustering signal (legacy behavior)
         scale=True,
     )
     

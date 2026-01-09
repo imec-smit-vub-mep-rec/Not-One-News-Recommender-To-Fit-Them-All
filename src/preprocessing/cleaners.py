@@ -279,9 +279,12 @@ class DataCleaner:
     
     Provides a pipeline-style interface for data cleaning.
     
-    IMPORTANT: User filtering (min_impressions_per_user) should typically be
-    disabled for clustering (filter_users=False) and only applied for evaluation.
-    This ensures clustering happens on ALL users, matching the legacy behavior.
+    IMPORTANT for clustering vs evaluation:
+    - For CLUSTERING: Set filter_users=False and remove_empty_articles=False
+      This keeps ALL users including homepage-only users, matching legacy behavior.
+      Homepage behavior (time spent on homepage vs articles) is a clustering signal!
+    - For EVALUATION: The interactions.csv is created separately and only includes
+      rows with valid article_id. RecPack's MinItemsPerUser filter is applied there.
     """
     
     def __init__(
@@ -300,7 +303,9 @@ class DataCleaner:
             min_impressions_per_user: Minimum impressions per user (only applied if filter_users=True)
             max_impressions_per_user: Maximum impressions per user (only applied if filter_users=True)
             min_impressions_per_session: Minimum impressions per session
-            remove_empty_articles: Whether to remove empty article entries
+            remove_empty_articles: Whether to remove impressions with empty/null article_id.
+                          Set to False for clustering to keep homepage views as a signal.
+                          The legacy code keeps homepage impressions for clustering.
             clean_categories: Whether to clean category strings
             remove_duplicates: Whether to remove duplicate impressions
             filter_users: Whether to filter users by impression count.
@@ -310,7 +315,7 @@ class DataCleaner:
         self.min_impressions_per_user = min_impressions_per_user
         self.max_impressions_per_user = max_impressions_per_user
         self.min_impressions_per_session = min_impressions_per_session
-        self.remove_empty_articles = remove_empty_articles
+        self.remove_empty_articles_flag = remove_empty_articles
         self.clean_categories_flag = clean_categories
         self.remove_duplicates = remove_duplicates
         self.filter_users = filter_users
@@ -334,9 +339,13 @@ class DataCleaner:
         self.stats['initial_rows'] = len(df)
         self.stats['initial_users'] = df['user_id'].nunique()
         
-        # Remove empty articles
-        if self.remove_empty_articles and 'article_id' in df.columns:
+        # Remove empty articles (homepage views)
+        # NOTE: For clustering, this should be DISABLED to keep homepage behavior as a signal.
+        # The legacy code keeps homepage impressions and uses them as clustering features.
+        if self.remove_empty_articles_flag and 'article_id' in df.columns:
             df = remove_empty_articles(df, articles_df)
+        else:
+            logger.info("Keeping homepage views (empty article_id) for clustering")
         
         # Remove duplicates
         if self.remove_duplicates:

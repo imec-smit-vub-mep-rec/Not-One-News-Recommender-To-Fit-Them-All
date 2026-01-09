@@ -178,6 +178,82 @@ def create_activity_features(
     return activity
 
 
+def create_homepage_features(
+    df: pd.DataFrame,
+    user_col: str = 'user_id',
+    article_col: str = 'article_id',
+    read_time_col: str = 'read_time',
+) -> pd.DataFrame:
+    """Create homepage behavior features per user.
+    
+    These features capture the distinction between users who primarily
+    browse the homepage vs those who read articles. This is an important
+    clustering signal from the legacy code.
+    
+    Args:
+        df: Impressions DataFrame (must include homepage views where article_id is null)
+        user_col: Name of user ID column
+        article_col: Name of article ID column
+        read_time_col: Name of read time column
+        
+    Returns:
+        DataFrame with user_id and homepage behavior columns
+    """
+    logger.info("Creating homepage features...")
+    
+    homepage_features = []
+    
+    for user, group in df.groupby(user_col):
+        # Count homepage vs article impressions
+        homepage_impressions = group[article_col].isna().sum()
+        article_impressions = group[article_col].notna().sum()
+        total_impressions = len(group)
+        
+        # Proportion of homepage impressions
+        homepage_ratio = homepage_impressions / total_impressions if total_impressions > 0 else 0
+        
+        # Reading time features (if available)
+        if read_time_col in group.columns:
+            homepage_rows = group[group[article_col].isna()]
+            article_rows = group[group[article_col].notna()]
+            
+            # Average reading time on homepage
+            avg_reading_time_homepage = homepage_rows[read_time_col].mean() if len(homepage_rows) > 0 else 0
+            
+            # Average reading time on articles
+            avg_reading_time_articles = article_rows[read_time_col].mean() if len(article_rows) > 0 else 0
+            
+            # Total reading time
+            total_reading_time = group[read_time_col].sum()
+            article_reading_time = article_rows[read_time_col].sum()
+            
+            # Proportion of time on articles vs homepage
+            proportion_article_time = article_reading_time / total_reading_time if total_reading_time > 0 else 0
+        else:
+            avg_reading_time_homepage = 0
+            avg_reading_time_articles = 0
+            proportion_article_time = 0
+        
+        homepage_features.append({
+            user_col: user,
+            'homepage_impressions': homepage_impressions,
+            'article_impressions': article_impressions,
+            'homepage_ratio': homepage_ratio,
+            'avg_reading_time_homepage': avg_reading_time_homepage,
+            'avg_reading_time_articles': avg_reading_time_articles,
+            'proportion_article_time': proportion_article_time,
+        })
+    
+    result = pd.DataFrame(homepage_features)
+    
+    # Fill NaN values
+    result = result.fillna(0)
+    
+    logger.info(f"Created {len(result.columns) - 1} homepage features for {len(result)} users")
+    
+    return result
+
+
 def create_diversity_features(
     df: pd.DataFrame,
     user_col: str = 'user_id',
@@ -290,6 +366,7 @@ def create_user_features(
     include_time: bool = True,
     include_activity: bool = True,
     include_diversity: bool = True,
+    include_homepage: bool = True,
     scale: bool = True,
     user_col: str = 'user_id',
 ) -> Tuple[pd.DataFrame, Dict[str, Any]]:
@@ -298,12 +375,15 @@ def create_user_features(
     Main entry point for feature engineering.
     
     Args:
-        impressions_df: Impressions DataFrame
+        impressions_df: Impressions DataFrame (should include homepage views for homepage features)
         articles_df: Optional articles DataFrame (for category info)
         include_categories: Whether to include category features
         include_time: Whether to include time features
         include_activity: Whether to include activity features
         include_diversity: Whether to include diversity features
+        include_homepage: Whether to include homepage behavior features.
+                          These capture the distinction between homepage browsers
+                          vs article readers, matching the legacy clustering behavior.
         scale: Whether to scale features
         user_col: Name of user ID column
         
@@ -344,6 +424,12 @@ def create_user_features(
         features = features.merge(activity_features, on=user_col, how='left')
         metadata['feature_groups']['activity'] = [c for c in activity_features.columns if c != user_col]
     
+    # Homepage behavior features (legacy clustering signal)
+    if include_homepage:
+        homepage_features = create_homepage_features(df, user_col)
+        features = features.merge(homepage_features, on=user_col, how='left')
+        metadata['feature_groups']['homepage'] = [c for c in homepage_features.columns if c != user_col]
+    
     # Diversity features
     if include_diversity and 'category_str' in df.columns:
         diversity_features = create_diversity_features(df, user_col)
@@ -381,6 +467,7 @@ class UserFeatureExtractor:
         include_time: bool = True,
         include_activity: bool = True,
         include_diversity: bool = True,
+        include_homepage: bool = True,
         scale: bool = True,
         user_col: str = 'user_id',
     ):
@@ -391,6 +478,9 @@ class UserFeatureExtractor:
             include_time: Whether to include time features
             include_activity: Whether to include activity features
             include_diversity: Whether to include diversity features
+            include_homepage: Whether to include homepage behavior features.
+                              These capture the distinction between homepage browsers
+                              vs article readers, matching legacy clustering behavior.
             scale: Whether to scale features
             user_col: Name of user ID column
         """
@@ -398,6 +488,7 @@ class UserFeatureExtractor:
         self.include_time = include_time
         self.include_activity = include_activity
         self.include_diversity = include_diversity
+        self.include_homepage = include_homepage
         self.scale = scale
         self.user_col = user_col
         
@@ -412,7 +503,7 @@ class UserFeatureExtractor:
         """Extract features and fit scaler.
         
         Args:
-            impressions_df: Impressions DataFrame
+            impressions_df: Impressions DataFrame (should include homepage views)
             articles_df: Optional articles DataFrame
             
         Returns:
@@ -425,6 +516,7 @@ class UserFeatureExtractor:
             include_time=self.include_time,
             include_activity=self.include_activity,
             include_diversity=self.include_diversity,
+            include_homepage=self.include_homepage,
             scale=self.scale,
             user_col=self.user_col,
         )
