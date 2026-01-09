@@ -467,6 +467,80 @@ class RecPackPipeline:
         return self.preprocessing_info
 
 
+def _evaluate_single_cluster(
+    cluster_id: int,
+    cluster_interactions: pd.DataFrame,
+    content_df: Optional[pd.DataFrame],
+    algorithms: Optional[List[str]],
+    k_values: List[int],
+    min_items_per_user: int,
+    output_dir: Optional[str],
+) -> Tuple[int, Optional[pd.DataFrame]]:
+    """Evaluate a single cluster. Helper for parallel execution.
+    
+    Args:
+        cluster_id: Cluster identifier
+        cluster_interactions: Interactions for this cluster
+        content_df: Optional content DataFrame
+        algorithms: List of algorithm names
+        k_values: List of k values for metrics
+        min_items_per_user: Minimum items per user for RecPack filter
+        output_dir: Optional directory to save results
+        
+    Returns:
+        Tuple of (cluster_id, results DataFrame or None if skipped)
+    """
+    import tempfile
+    import os
+    
+    logger.info(f"Evaluating cluster {cluster_id} ({len(cluster_interactions)} interactions)...")
+    
+    # Skip if too few interactions
+    if len(cluster_interactions) < 100:
+        logger.warning(f"Cluster {cluster_id} has too few interactions, skipping")
+        return cluster_id, None
+    
+    # Run pipeline (min_items_per_user filtering happens here)
+    pipeline = RecPackPipeline(k_values=k_values, min_items_per_user=min_items_per_user)
+    
+    # Create temporary files for the cluster data
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.csv', delete=False) as f:
+        cluster_interactions.to_csv(f.name, index=False)
+        interactions_path = f.name
+    
+    try:
+        content_path = None
+        if content_df is not None:
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.csv', delete=False) as f:
+                content_df.to_csv(f.name, index=False)
+                content_path = f.name
+        
+        pipeline.load_data(
+            interactions_path=interactions_path,
+            content_path=content_path,
+        )
+        
+        cluster_results = pipeline.run(algorithms=algorithms)
+        
+        # Save if output dir provided
+        if output_dir:
+            ensure_dir(output_dir)
+            output_path = Path(output_dir) / f'cluster_{cluster_id}_results.csv'
+            pipeline.save_results(str(output_path))
+        
+        return cluster_id, cluster_results
+    
+    except Exception as e:
+        logger.error(f"Error evaluating cluster {cluster_id}: {e}")
+        return cluster_id, None
+    
+    finally:
+        # Clean up temp files
+        os.unlink(interactions_path)
+        if content_path:
+            os.unlink(content_path)
+
+
 def run_cluster_evaluation(
     interactions_df: pd.DataFrame,
     users_df: pd.DataFrame,
@@ -475,6 +549,7 @@ def run_cluster_evaluation(
     k_values: List[int] = [10, 20, 50],
     min_items_per_user: int = 5,
     output_dir: Optional[str] = None,
+    n_jobs: int = 1,
 ) -> Dict[int, pd.DataFrame]:
     """Run evaluation for each user cluster.
     
@@ -494,74 +569,53 @@ def run_cluster_evaluation(
                             Users with fewer interactions are excluded from evaluation
                             but were still included in clustering.
         output_dir: Optional directory to save results
+        n_jobs: Number of parallel jobs (1 = sequential, -1 = all cores).
+                Note: Use n_jobs=1 if running on GPU to avoid memory issues.
         
     Returns:
         Dictionary mapping cluster_id to results DataFrame
     """
     check_recpack_available()
     
-    results = {}
     cluster_ids = sorted(users_df['cluster_id'].unique())
     
-    logger.info(f"Running evaluation for {len(cluster_ids)} clusters...")
+    logger.info(f"Running evaluation for {len(cluster_ids)} clusters (n_jobs={n_jobs})...")
     logger.info(f"NOTE: Users with < {min_items_per_user} interactions will be filtered by RecPack")
     
+    # Prepare cluster data
+    cluster_data = {}
     for cluster_id in cluster_ids:
-        logger.info(f"\n{'='*60}")
-        logger.info(f"Evaluating cluster {cluster_id}")
-        logger.info(f"{'='*60}")
-        
-        # Filter users for this cluster
         cluster_users = users_df[users_df['cluster_id'] == cluster_id]['user_id'].astype(str)
-        
-        # Filter interactions (includes ALL users in cluster; RecPack filters by min_items later)
         cluster_interactions = interactions_df[
             interactions_df['user_id'].astype(str).isin(cluster_users)
         ].copy()
-        
-        logger.info(f"Cluster {cluster_id}: {len(cluster_users)} users (before RecPack filter), "
-                    f"{len(cluster_interactions)} interactions")
-        
-        # Skip if too few interactions
-        if len(cluster_interactions) < 100:
-            logger.warning(f"Cluster {cluster_id} has too few interactions, skipping")
-            continue
-        
-        # Run pipeline (min_items_per_user filtering happens here)
-        pipeline = RecPackPipeline(k_values=k_values, min_items_per_user=min_items_per_user)
-        
-        # Create temporary files for the cluster data
-        import tempfile
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.csv', delete=False) as f:
-            cluster_interactions.to_csv(f.name, index=False)
-            interactions_path = f.name
-        
-        try:
-            content_path = None
-            if content_df is not None:
-                with tempfile.NamedTemporaryFile(mode='w', suffix='.csv', delete=False) as f:
-                    content_df.to_csv(f.name, index=False)
-                    content_path = f.name
-            
-            pipeline.load_data(
-                interactions_path=interactions_path,
-                content_path=content_path,
+        cluster_data[cluster_id] = cluster_interactions
+        logger.info(f"Cluster {cluster_id}: {len(cluster_users)} users, {len(cluster_interactions)} interactions")
+    
+    # Run evaluations
+    if n_jobs == 1:
+        # Sequential execution
+        results_list = [
+            _evaluate_single_cluster(
+                cluster_id, cluster_interactions, content_df,
+                algorithms, k_values, min_items_per_user, output_dir
             )
-            
-            cluster_results = pipeline.run(algorithms=algorithms)
-            results[cluster_id] = cluster_results
-            
-            # Save if output dir provided
-            if output_dir:
-                ensure_dir(output_dir)
-                output_path = Path(output_dir) / f'cluster_{cluster_id}_results.csv'
-                pipeline.save_results(str(output_path))
-        
-        finally:
-            # Clean up temp files
-            import os
-            os.unlink(interactions_path)
-            if content_path:
-                os.unlink(content_path)
+            for cluster_id, cluster_interactions in cluster_data.items()
+        ]
+    else:
+        # Parallel execution
+        from joblib import Parallel, delayed
+        results_list = Parallel(n_jobs=n_jobs)(
+            delayed(_evaluate_single_cluster)(
+                cluster_id, cluster_interactions, content_df,
+                algorithms, k_values, min_items_per_user, output_dir
+            )
+            for cluster_id, cluster_interactions in cluster_data.items()
+        )
+    
+    # Convert to dict, filtering out None results
+    results = {cid: res for cid, res in results_list if res is not None}
+    
+    logger.info(f"Completed evaluation for {len(results)}/{len(cluster_ids)} clusters")
     
     return results

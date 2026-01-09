@@ -48,7 +48,8 @@ def load_dataframe(
     if format == 'csv':
         return pd.read_csv(path, **kwargs)
     elif format == 'parquet':
-        return pd.read_parquet(path, **kwargs)
+        # Use pyarrow engine for better performance
+        return pd.read_parquet(path, engine='pyarrow', **kwargs)
     elif format == 'json':
         return pd.read_json(path, **kwargs)
     elif format == 'jsonl':
@@ -71,7 +72,8 @@ def save_dataframe(
         path: Path to save to
         format: File format ('csv', 'parquet', 'json'). 
                 Auto-detected from extension if None.
-        compression: Compression method (e.g., 'gzip', 'snappy')
+        compression: Compression method (e.g., 'gzip', 'snappy').
+                     Default for parquet is 'snappy' (faster than gzip).
         **kwargs: Additional arguments passed to the pandas writer
         
     Returns:
@@ -86,7 +88,14 @@ def save_dataframe(
     if format == 'csv':
         df.to_csv(path, index=False, **kwargs)
     elif format == 'parquet':
-        df.to_parquet(path, index=False, compression=compression or 'gzip', **kwargs)
+        # Use snappy compression (faster) and pyarrow engine
+        df.to_parquet(
+            path,
+            index=False,
+            compression=compression or 'snappy',
+            engine='pyarrow',
+            **kwargs
+        )
     elif format == 'json':
         df.to_json(path, orient='records', indent=2, **kwargs)
     else:

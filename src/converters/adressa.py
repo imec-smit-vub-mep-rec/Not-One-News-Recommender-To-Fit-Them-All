@@ -78,6 +78,8 @@ class AdressaConverter(BaseConverter):
     def _process_chunk(self, chunk: pd.DataFrame) -> pd.DataFrame:
         """Process a single chunk of data.
         
+        Vectorized implementation for better performance.
+        
         Args:
             chunk: DataFrame chunk from JSONL
             
@@ -88,78 +90,113 @@ class AdressaConverter(BaseConverter):
         chunk['datetime'] = pd.to_datetime(chunk['time'], unit='s')
         
         # Sort by user and time
-        chunk = chunk.sort_values(['userId', 'time'])
+        chunk = chunk.sort_values(['userId', 'time']).reset_index(drop=True)
         
-        # Detect homepage views
+        # Detect homepage views (vectorized)
         chunk['is_homepage'] = chunk['url'].isin(self.HOMEPAGE_URLS)
         
-        # Extract category from URL
-        chunk['category_str'] = chunk['url'].apply(self.extract_category_from_url)
+        # Extract category from URL (vectorized using str operations)
+        chunk['category_str'] = chunk['url'].str.extract(
+            r'https?://[^/]+/([^/]+)', expand=False
+        ).fillna('')
+        # Clear category for homepage URLs
+        chunk.loc[chunk['is_homepage'], 'category_str'] = ''
         
-        # Process sessions for each user
-        chunk['session_id'] = None
+        # Vectorized session assignment
+        # Compute time difference within each user
+        chunk['time_diff'] = chunk.groupby('userId')['time'].diff()
         
-        for user_id, user_chunk in chunk.groupby('userId'):
-            last_time, current_session = self._user_sessions.get(
-                user_id, (None, None)
-            )
+        # Check for sessionStart flag
+        session_start_flag = chunk.get('sessionStart', pd.Series(False, index=chunk.index))
+        if isinstance(session_start_flag, pd.Series):
+            session_start_flag = session_start_flag.fillna(False)
+        else:
+            session_start_flag = pd.Series(False, index=chunk.index)
+        
+        # New session when: first row for user (NaN diff), timeout exceeded, or sessionStart flag
+        new_session_mask = (
+            chunk['time_diff'].isna() |  # First row for this user
+            (chunk['time_diff'] > self.config.session_timeout_seconds) |  # Timeout
+            session_start_flag  # Explicit session start
+        )
+        
+        # Generate session IDs: cumulative sum of new_session creates groups
+        # Then combine with userId to make unique session IDs
+        chunk['session_group'] = new_session_mask.groupby(chunk['userId']).cumsum()
+        chunk['session_id'] = chunk['userId'].astype(str) + '_' + chunk['session_group'].astype(str)
+        
+        # Update user sessions state for continuity across chunks
+        for user_id in chunk['userId'].unique():
+            user_data = chunk[chunk['userId'] == user_id]
+            last_time = user_data['time'].iloc[-1]
+            last_session = user_data['session_id'].iloc[-1]
+            self._user_sessions[user_id] = (last_time, last_session)
+        
+        # Process article information (vectorized aggregation)
+        non_homepage = chunk[~chunk['is_homepage']].copy()
+        
+        # Fill missing article IDs
+        if 'id' in non_homepage.columns:
+            non_homepage['article_id_clean'] = non_homepage['id'].fillna('empty').replace('', 'empty')
+        else:
+            non_homepage['article_id_clean'] = 'empty'
+        
+        # Aggregate article stats
+        if len(non_homepage) > 0:
+            # Get first occurrence info for new articles
+            article_first = non_homepage.groupby('article_id_clean').first()
             
-            for idx, row in user_chunk.iterrows():
-                # Check if new session needed
-                if (row.get('sessionStart', False) or
-                    last_time is None or
-                    (row['time'] - last_time) > self.config.session_timeout_seconds):
-                    current_session = str(uuid.uuid4())
-                
-                chunk.at[idx, 'session_id'] = current_session
-                last_time = row['time']
+            # Get aggregated stats
+            active_time_col = 'activeTime' if 'activeTime' in non_homepage.columns else None
             
-            self._user_sessions[user_id] = (last_time, current_session)
-        
-        # Process article information
-        non_homepage = chunk[~chunk['is_homepage']]
-        
-        for _, row in non_homepage.iterrows():
-            article_id = row.get('id', '')
-            if not article_id or pd.isna(article_id):
-                article_id = "empty"
+            article_stats = non_homepage.groupby('article_id_clean').agg(
+                views=('article_id_clean', 'count'),
+                total_reading_time=(active_time_col, 'sum') if active_time_col else ('article_id_clean', 'count'),
+            ).reset_index()
             
-            if article_id not in self._articles:
-                self._articles[article_id] = {
-                    'article_id': article_id,
-                    'url': row.get('url', ''),
-                    'time_published': row.get('publishtime'),
-                    'category_str': row['category_str'],
-                    'title': row.get('title', ''),
-                    'sentiment_score': 0.5,
-                    'views': 1,
-                    'total_reading_time': row.get('activeTime', 0) or 0,
-                }
-            else:
-                self._articles[article_id]['views'] += 1
-                self._articles[article_id]['total_reading_time'] += row.get('activeTime', 0) or 0
+            # Merge and update articles dict
+            for _, row in article_stats.iterrows():
+                article_id = row['article_id_clean']
+                if article_id not in self._articles:
+                    first_row = article_first.loc[article_id]
+                    self._articles[article_id] = {
+                        'article_id': article_id,
+                        'url': first_row.get('url', ''),
+                        'time_published': first_row.get('publishtime'),
+                        'category_str': first_row.get('category_str', ''),
+                        'title': first_row.get('title', ''),
+                        'sentiment_score': 0.5,
+                        'views': int(row['views']),
+                        'total_reading_time': float(row['total_reading_time']) if active_time_col else 0,
+                    }
+                else:
+                    self._articles[article_id]['views'] += int(row['views'])
+                    if active_time_col:
+                        self._articles[article_id]['total_reading_time'] += float(row['total_reading_time'])
         
-        # Create impressions DataFrame
+        # Create impressions DataFrame (vectorized)
+        article_id_col = chunk['id'].fillna('empty') if 'id' in chunk.columns else pd.Series('empty', index=chunk.index)
+        article_ids = np.where(chunk['is_homepage'], 'homepage', article_id_col)
+        
+        active_time = chunk['activeTime'].fillna(0) if 'activeTime' in chunk.columns else pd.Series(0, index=chunk.index)
+        
         impressions = pd.DataFrame({
             'session_id': chunk['session_id'],
             'impression_id': chunk['eventId'].astype(str),
-            'article_id': chunk.apply(
-                lambda x: 'homepage' if x['is_homepage'] else x.get('id', 'empty'),
-                axis=1
-            ),
+            'article_id': article_ids,
             'user_id': chunk['userId'],
             'impression_time': chunk['time'] * 1000,  # Convert to milliseconds
-            'read_time': chunk.get('activeTime', 0).fillna(0),
+            'read_time': active_time,
         })
         
-        # Track user subscription status (if URL contains /pluss/)
-        for _, row in chunk.iterrows():
-            user_id = row['userId']
-            is_subscriber = '/pluss/' in str(row.get('url', ''))
-            
+        # Track user subscription status (vectorized)
+        chunk['is_subscriber'] = chunk['url'].str.contains('/pluss/', na=False)
+        subscriber_users = chunk[chunk['is_subscriber']]['userId'].unique()
+        
+        for user_id in chunk['userId'].unique():
             if user_id not in self._user_stats:
-                self._user_stats[user_id] = {'is_subscriber': is_subscriber}
-            elif is_subscriber:
+                self._user_stats[user_id] = {'is_subscriber': user_id in subscriber_users}
+            elif user_id in subscriber_users:
                 self._user_stats[user_id]['is_subscriber'] = True
         
         return impressions

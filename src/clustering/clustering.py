@@ -9,6 +9,7 @@ import pandas as pd
 import numpy as np
 from sklearn.cluster import KMeans, MiniBatchKMeans
 from sklearn.metrics import silhouette_score, calinski_harabasz_score, davies_bouldin_score
+from joblib import Parallel, delayed
 import warnings
 
 from ..utils.logging import get_logger
@@ -17,14 +18,73 @@ from ..utils.logging import get_logger
 logger = get_logger("clustering.clustering")
 
 
+def _fit_kmeans_for_k(
+    X: np.ndarray,
+    k: int,
+    random_state: int,
+    n_init: int,
+    use_minibatch: bool = False,
+    batch_size: int = 2048,
+) -> Dict[str, Any]:
+    """Fit KMeans for a single k value and compute metrics.
+    
+    Helper function for parallel K-selection.
+    
+    Args:
+        X: Feature matrix
+        k: Number of clusters
+        random_state: Random state
+        n_init: Number of initializations
+        use_minibatch: Whether to use MiniBatchKMeans
+        batch_size: Batch size for MiniBatchKMeans
+        
+    Returns:
+        Dictionary with k value and computed metrics
+    """
+    # Select KMeans variant
+    if use_minibatch:
+        kmeans = MiniBatchKMeans(
+            n_clusters=k,
+            random_state=random_state,
+            n_init=n_init,
+            batch_size=batch_size,
+        )
+    else:
+        kmeans = KMeans(n_clusters=k, random_state=random_state, n_init=n_init)
+    
+    labels = kmeans.fit_predict(X)
+    
+    result = {
+        'k': k,
+        'inertia': kmeans.inertia_,
+    }
+    
+    if k > 1:
+        result['silhouette_score'] = silhouette_score(X, labels)
+        result['calinski_harabasz_score'] = calinski_harabasz_score(X, labels)
+        result['davies_bouldin_score'] = davies_bouldin_score(X, labels)
+    else:
+        result['silhouette_score'] = np.nan
+        result['calinski_harabasz_score'] = np.nan
+        result['davies_bouldin_score'] = np.nan
+    
+    return result
+
+
 def find_optimal_k(
     X: np.ndarray,
     k_range: range = range(2, 11),
     method: str = 'elbow',
     random_state: int = 42,
     n_init: int = 10,
+    n_jobs: int = -1,
+    use_minibatch: bool = False,
+    minibatch_threshold: int = 50000,
+    batch_size: int = 2048,
 ) -> Tuple[int, Dict[str, Any]]:
     """Find optimal number of clusters.
+    
+    Uses parallel processing to evaluate multiple k values simultaneously.
     
     Args:
         X: Feature matrix (n_samples, n_features)
@@ -32,46 +92,43 @@ def find_optimal_k(
         method: Method for selecting optimal k ('elbow', 'silhouette', 'combined')
         random_state: Random state for reproducibility
         n_init: Number of initializations for k-means
+        n_jobs: Number of parallel jobs (-1 = all cores)
+        use_minibatch: Whether to use MiniBatchKMeans (None = auto based on threshold)
+        minibatch_threshold: Auto-enable MiniBatch if n_samples > this threshold
+        batch_size: Batch size for MiniBatchKMeans
         
     Returns:
         Tuple of (optimal_k, metrics_dict)
     """
-    logger.info(f"Finding optimal k in range {list(k_range)} using {method} method...")
+    n_samples = len(X)
+    k_list = list(k_range)
     
+    # Auto-detect minibatch usage for large datasets
+    if not use_minibatch and n_samples > minibatch_threshold:
+        use_minibatch = True
+        logger.info(f"Auto-enabled MiniBatchKMeans for K-selection ({n_samples:,} > {minibatch_threshold:,} samples)")
+    
+    logger.info(f"Finding optimal k in range {k_list} using {method} method (parallel, n_jobs={n_jobs})...")
+    
+    # Run K-means fitting in parallel
+    results = Parallel(n_jobs=n_jobs)(
+        delayed(_fit_kmeans_for_k)(
+            X, k, random_state, n_init, use_minibatch, batch_size
+        )
+        for k in k_list
+    )
+    
+    # Sort results by k (parallel execution may return out of order)
+    results = sorted(results, key=lambda x: x['k'])
+    
+    # Build metrics dict in the same format as before
     metrics = {
-        'k_values': list(k_range),
-        'inertias': [],
-        'silhouette_scores': [],
-        'calinski_harabasz_scores': [],
-        'davies_bouldin_scores': [],
+        'k_values': [r['k'] for r in results],
+        'inertias': [r['inertia'] for r in results],
+        'silhouette_scores': [r['silhouette_score'] for r in results],
+        'calinski_harabasz_scores': [r['calinski_harabasz_score'] for r in results],
+        'davies_bouldin_scores': [r['davies_bouldin_score'] for r in results],
     }
-    
-    for k in k_range:
-        logger.info(f"Evaluating k={k}...")
-        
-        # Fit k-means
-        kmeans = KMeans(n_clusters=k, random_state=random_state, n_init=n_init)
-        labels = kmeans.fit_predict(X)
-        
-        # Compute metrics
-        metrics['inertias'].append(kmeans.inertia_)
-        
-        if k > 1:
-            # Silhouette score (requires k > 1)
-            sil_score = silhouette_score(X, labels)
-            metrics['silhouette_scores'].append(sil_score)
-            
-            # Calinski-Harabasz score
-            ch_score = calinski_harabasz_score(X, labels)
-            metrics['calinski_harabasz_scores'].append(ch_score)
-            
-            # Davies-Bouldin score (lower is better)
-            db_score = davies_bouldin_score(X, labels)
-            metrics['davies_bouldin_scores'].append(db_score)
-        else:
-            metrics['silhouette_scores'].append(np.nan)
-            metrics['calinski_harabasz_scores'].append(np.nan)
-            metrics['davies_bouldin_scores'].append(np.nan)
     
     # Find optimal k
     if method == 'silhouette':

@@ -158,6 +158,8 @@ class SentenceTransformerContentBased(Algorithm):
     ) -> Dict[int, str]:
         """Convert DataFrame to content dictionary.
         
+        Vectorized implementation for performance.
+        
         Args:
             df: DataFrame with article_id and content columns
             item_mapping: Optional mapping from article_id to internal ID
@@ -165,24 +167,41 @@ class SentenceTransformerContentBased(Algorithm):
         Returns:
             Dictionary mapping internal IDs to content strings
         """
-        content_dict = {}
+        # Get article_id column (try both names)
+        if 'article_id' in df.columns:
+            article_ids = df['article_id'].astype(str)
+        elif 'item_id' in df.columns:
+            article_ids = df['item_id'].astype(str)
+        else:
+            return {}
         
-        for _, row in df.iterrows():
-            article_id = str(row.get('article_id', row.get('item_id', '')))
-            content_text = row.get('content', row.get('text', ''))
+        # Get content column (try both names)
+        if 'content' in df.columns:
+            content_texts = df['content']
+        elif 'text' in df.columns:
+            content_texts = df['text']
+        else:
+            return {}
+        
+        if item_mapping:
+            # Vectorized mapping: map article_ids to internal IDs
+            internal_ids = article_ids.map(item_mapping)
             
-            if item_mapping:
-                internal_id = item_mapping.get(article_id)
-                if internal_id is not None:
-                    content_dict[internal_id] = content_text
-            else:
-                try:
-                    internal_id = int(article_id)
-                    content_dict[internal_id] = content_text
-                except ValueError:
-                    pass
-        
-        return content_dict
+            # Filter to valid mappings (non-null)
+            valid_mask = internal_ids.notna()
+            valid_ids = internal_ids[valid_mask].astype(int)
+            valid_content = content_texts[valid_mask]
+            
+            return dict(zip(valid_ids, valid_content))
+        else:
+            # No mapping: try to convert article_ids to int directly
+            # Use pd.to_numeric with errors='coerce' to handle non-numeric IDs
+            numeric_ids = pd.to_numeric(article_ids, errors='coerce')
+            valid_mask = numeric_ids.notna()
+            valid_ids = numeric_ids[valid_mask].astype(int)
+            valid_content = content_texts[valid_mask]
+            
+            return dict(zip(valid_ids, valid_content))
     
     def _log(self, msg: str):
         """Log message if verbose mode enabled."""
@@ -287,6 +306,8 @@ class SentenceTransformerContentBased(Algorithm):
     def _predict(self, X: csr_matrix) -> csr_matrix:
         """Generate predictions for users.
         
+        Optimized with batched user embedding computation and batched NN queries.
+        
         Args:
             X: User-item interaction matrix
             
@@ -304,54 +325,83 @@ class SentenceTransformerContentBased(Algorithm):
             logger.warning("No item embeddings available for prediction")
             return result.tocsr()
         
-        users_with_recs = 0
+        # Build item_id to embedding index mapping for vectorized lookup
+        embedding_matrix = self._item_embeddings_matrix
+        item_id_to_emb_idx = self._item_id_to_idx
+        
+        # Compute user embeddings in batches
+        user_embeddings_list = []
+        valid_user_ids = []
+        user_item_sets = []
         
         for user_id in range(num_users):
-            # Get user's interaction history
             user_items = X[user_id].nonzero()[1]
             
             if len(user_items) == 0:
                 continue
             
-            # Compute user embedding as mean of item embeddings
-            user_embeddings = []
-            for item_id in user_items:
-                emb = self._item_embeddings.get(item_id)
-                if emb is not None:
-                    user_embeddings.append(emb)
+            # Get embeddings for items user interacted with
+            emb_indices = [item_id_to_emb_idx.get(item_id) for item_id in user_items]
+            emb_indices = [idx for idx in emb_indices if idx is not None]
             
-            if not user_embeddings:
+            if not emb_indices:
                 continue
             
-            user_embedding = np.mean(user_embeddings, axis=0)
+            # Compute user embedding as mean of item embeddings (vectorized)
+            user_embedding = embedding_matrix[emb_indices].mean(axis=0)
             
-            # Query the appropriate backend
-            if self.backend == 'annoy':
-                nn_indices, distances = self._query_annoy(user_embedding)
-            else:
-                nn_indices, distances = self._query_sklearn(user_embedding)
-            
-            # Convert matrix indices back to item IDs and filter interacted items
-            user_items_set = set(user_items)
-            recommendations = []
-            
-            for matrix_idx, dist in zip(nn_indices, distances):
-                item_id = self._idx_to_item_id[matrix_idx]
-                if item_id not in user_items_set:
-                    score = self._distance_to_similarity(dist)
-                    recommendations.append((item_id, score))
-            
-            # Take top-k
-            recommendations.sort(key=lambda x: x[1], reverse=True)
-            
-            for item_id, score in recommendations[:self.num_neighbors]:
-                if 0 <= item_id < num_items:
-                    result[user_id, item_id] = score
-            
-            if recommendations:
-                users_with_recs += 1
+            user_embeddings_list.append(user_embedding)
+            valid_user_ids.append(user_id)
+            user_item_sets.append(set(user_items))
         
-        self._log(f"Generated recommendations for {users_with_recs}/{num_users} users")
+        if not user_embeddings_list:
+            self._log("No valid user embeddings to generate recommendations")
+            return result.tocsr()
+        
+        user_embeddings = np.array(user_embeddings_list)
+        
+        # Batch query for sklearn backend
+        if self.backend == 'sklearn':
+            distances, nn_indices = self._nn_index.kneighbors(user_embeddings)
+            
+            for i, user_id in enumerate(valid_user_ids):
+                user_items_set = user_item_sets[i]
+                recommendations = []
+                
+                for matrix_idx, dist in zip(nn_indices[i], distances[i]):
+                    item_id = self._idx_to_item_id[matrix_idx]
+                    if item_id not in user_items_set:
+                        score = self._distance_to_similarity(dist)
+                        recommendations.append((item_id, score))
+                
+                # Take top-k
+                recommendations.sort(key=lambda x: x[1], reverse=True)
+                
+                for item_id, score in recommendations[:self.num_neighbors]:
+                    if 0 <= item_id < num_items:
+                        result[user_id, item_id] = score
+        else:
+            # Annoy doesn't support batch queries, fall back to sequential
+            for i, user_id in enumerate(valid_user_ids):
+                user_embedding = user_embeddings[i]
+                user_items_set = user_item_sets[i]
+                
+                nn_indices, distances = self._query_annoy(user_embedding)
+                recommendations = []
+                
+                for matrix_idx, dist in zip(nn_indices, distances):
+                    item_id = self._idx_to_item_id[matrix_idx]
+                    if item_id not in user_items_set:
+                        score = self._distance_to_similarity(dist)
+                        recommendations.append((item_id, score))
+                
+                recommendations.sort(key=lambda x: x[1], reverse=True)
+                
+                for item_id, score in recommendations[:self.num_neighbors]:
+                    if 0 <= item_id < num_items:
+                        result[user_id, item_id] = score
+        
+        self._log(f"Generated recommendations for {len(valid_user_ids)}/{num_users} users")
         
         return result.tocsr()
     
