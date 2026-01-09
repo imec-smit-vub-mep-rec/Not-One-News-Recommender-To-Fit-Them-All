@@ -181,13 +181,17 @@ def run_preprocessing(
     config: PipelineConfig,
     session: Session,
 ) -> tuple:
-    """Run preprocessing step.
+    """Run preprocessing step for CLUSTERING.
+    
+    IMPORTANT: This preprocessing does NOT filter users by impression count.
+    Clustering must happen on ALL users. User filtering is only applied
+    later during the RecPack evaluation step.
     
     Returns:
         Tuple of (cleaned_articles, cleaned_impressions, interactions)
     """
     logger.info("=" * 60)
-    logger.info("STEP 2: Preprocessing")
+    logger.info("STEP 2: Preprocessing (for clustering - NO user filtering)")
     logger.info("=" * 60)
     
     # Validate data
@@ -201,23 +205,26 @@ def run_preprocessing(
     if not is_valid:
         logger.warning("Validation found issues, proceeding with cleaning")
     
-    # Clean data
+    # Clean data for CLUSTERING - NO user filtering!
+    # User filtering only happens in RecPack evaluation.
     cleaner = DataCleaner(
         min_impressions_per_user=config.clustering.min_impressions_per_user,
         remove_empty_articles=True,
         clean_categories=True,
+        filter_users=False,  # CRITICAL: Do NOT filter users before clustering
     )
     
     cleaned_articles = cleaner.clean_articles(articles_df)
     cleaned_impressions = cleaner.clean_impressions(impressions_df, cleaned_articles)
     
     logger.info(f"Cleaning stats: {cleaner.get_stats()}")
+    logger.info(f"NOTE: All {cleaner.get_stats().get('final_users', 'N/A')} users retained for clustering")
     
     # Save cleaned data
     save_dataframe(cleaned_articles, session.get_path("articles_cleaned.parquet"))
     save_dataframe(cleaned_impressions, session.get_path("impressions_cleaned.parquet"))
     
-    # Create interactions for RecPack
+    # Create interactions for RecPack (from ALL users - filtering happens in RecPack)
     interactions_df = behaviors_to_interactions(cleaned_impressions)
     
     interactions_path = session.get_path("interactions.csv")
@@ -319,11 +326,16 @@ def run_evaluation(
 ) -> dict:
     """Run evaluation step.
     
+    NOTE: User filtering (min_impressions_per_user) happens HERE via RecPack's
+    MinItemsPerUser filter, NOT during preprocessing. This ensures clustering
+    happens on ALL users, while evaluation only includes users with enough
+    interactions for meaningful recommendations.
+    
     Returns:
         Dictionary of results per cluster
     """
     logger.info("=" * 60)
-    logger.info("STEP 4: RecPack Evaluation")
+    logger.info("STEP 4: RecPack Evaluation (user filtering applied here)")
     logger.info("=" * 60)
     
     try:
@@ -345,6 +357,7 @@ def run_evaluation(
         content_df=content_df,
         algorithms=algorithm_names,
         k_values=config.evaluation.k_values,
+        min_items_per_user=config.clustering.min_impressions_per_user,  # Filter only at evaluation
         output_dir=results_dir,
     )
     

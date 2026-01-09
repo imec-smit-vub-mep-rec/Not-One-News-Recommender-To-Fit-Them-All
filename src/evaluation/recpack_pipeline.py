@@ -473,16 +473,26 @@ def run_cluster_evaluation(
     content_df: Optional[pd.DataFrame] = None,
     algorithms: Optional[List[str]] = None,
     k_values: List[int] = [10, 20, 50],
+    min_items_per_user: int = 5,
     output_dir: Optional[str] = None,
 ) -> Dict[int, pd.DataFrame]:
     """Run evaluation for each user cluster.
     
+    NOTE: User filtering (min_items_per_user) happens HERE during RecPack
+    preprocessing, NOT during data cleaning. This ensures clustering happens
+    on ALL users, while evaluation filters to users with enough interactions.
+    
     Args:
-        interactions_df: Full interactions DataFrame
-        users_df: DataFrame with user_id and cluster_id columns
+        interactions_df: Full interactions DataFrame (all users, including those
+                         who will be filtered out by min_items_per_user)
+        users_df: DataFrame with user_id and cluster_id columns (from clustering,
+                  which includes ALL users)
         content_df: Optional content DataFrame
         algorithms: List of algorithm names
         k_values: List of k values for metrics
+        min_items_per_user: Minimum items per user for RecPack filter (default: 5).
+                            Users with fewer interactions are excluded from evaluation
+                            but were still included in clustering.
         output_dir: Optional directory to save results
         
     Returns:
@@ -494,6 +504,7 @@ def run_cluster_evaluation(
     cluster_ids = sorted(users_df['cluster_id'].unique())
     
     logger.info(f"Running evaluation for {len(cluster_ids)} clusters...")
+    logger.info(f"NOTE: Users with < {min_items_per_user} interactions will be filtered by RecPack")
     
     for cluster_id in cluster_ids:
         logger.info(f"\n{'='*60}")
@@ -503,12 +514,12 @@ def run_cluster_evaluation(
         # Filter users for this cluster
         cluster_users = users_df[users_df['cluster_id'] == cluster_id]['user_id'].astype(str)
         
-        # Filter interactions
+        # Filter interactions (includes ALL users in cluster; RecPack filters by min_items later)
         cluster_interactions = interactions_df[
             interactions_df['user_id'].astype(str).isin(cluster_users)
         ].copy()
         
-        logger.info(f"Cluster {cluster_id}: {len(cluster_users)} users, "
+        logger.info(f"Cluster {cluster_id}: {len(cluster_users)} users (before RecPack filter), "
                     f"{len(cluster_interactions)} interactions")
         
         # Skip if too few interactions
@@ -516,8 +527,8 @@ def run_cluster_evaluation(
             logger.warning(f"Cluster {cluster_id} has too few interactions, skipping")
             continue
         
-        # Run pipeline
-        pipeline = RecPackPipeline(k_values=k_values)
+        # Run pipeline (min_items_per_user filtering happens here)
+        pipeline = RecPackPipeline(k_values=k_values, min_items_per_user=min_items_per_user)
         
         # Create temporary files for the cluster data
         import tempfile

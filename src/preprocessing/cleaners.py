@@ -278,6 +278,10 @@ class DataCleaner:
     """Comprehensive data cleaner that applies multiple cleaning steps.
     
     Provides a pipeline-style interface for data cleaning.
+    
+    IMPORTANT: User filtering (min_impressions_per_user) should typically be
+    disabled for clustering (filter_users=False) and only applied for evaluation.
+    This ensures clustering happens on ALL users, matching the legacy behavior.
     """
     
     def __init__(
@@ -288,16 +292,20 @@ class DataCleaner:
         remove_empty_articles: bool = True,
         clean_categories: bool = True,
         remove_duplicates: bool = True,
+        filter_users: bool = True,
     ):
         """Initialize the cleaner.
         
         Args:
-            min_impressions_per_user: Minimum impressions per user
-            max_impressions_per_user: Maximum impressions per user
+            min_impressions_per_user: Minimum impressions per user (only applied if filter_users=True)
+            max_impressions_per_user: Maximum impressions per user (only applied if filter_users=True)
             min_impressions_per_session: Minimum impressions per session
             remove_empty_articles: Whether to remove empty article entries
             clean_categories: Whether to clean category strings
             remove_duplicates: Whether to remove duplicate impressions
+            filter_users: Whether to filter users by impression count.
+                          Set to False for clustering (cluster ALL users),
+                          set to True for evaluation (filter for RecPack).
         """
         self.min_impressions_per_user = min_impressions_per_user
         self.max_impressions_per_user = max_impressions_per_user
@@ -305,6 +313,7 @@ class DataCleaner:
         self.remove_empty_articles = remove_empty_articles
         self.clean_categories_flag = clean_categories
         self.remove_duplicates = remove_duplicates
+        self.filter_users = filter_users
         
         self.stats = {}
     
@@ -337,12 +346,17 @@ class DataCleaner:
         if self.min_impressions_per_session > 1 and 'session_id' in df.columns:
             df = remove_invalid_sessions(df, self.min_impressions_per_session)
         
-        # Remove outlier users
-        df = remove_outlier_users(
-            df,
-            self.min_impressions_per_user,
-            self.max_impressions_per_user
-        )
+        # Remove outlier users (only if filter_users is enabled)
+        # NOTE: For clustering, this should be DISABLED to cluster ALL users.
+        # Filtering should only happen for RecPack evaluation.
+        if self.filter_users:
+            df = remove_outlier_users(
+                df,
+                self.min_impressions_per_user,
+                self.max_impressions_per_user
+            )
+        else:
+            logger.info("User filtering disabled - keeping ALL users for clustering")
         
         self.stats['final_rows'] = len(df)
         self.stats['final_users'] = df['user_id'].nunique()

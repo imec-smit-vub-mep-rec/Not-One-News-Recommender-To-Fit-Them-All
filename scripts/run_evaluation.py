@@ -71,6 +71,15 @@ def parse_args():
     )
     
     parser.add_argument(
+        "--min-items-per-user",
+        type=int,
+        default=5,
+        help="Minimum interactions per user for RecPack filter (default: 5). "
+             "NOTE: Clustering should include ALL users; this filter is only "
+             "applied during evaluation.",
+    )
+    
+    parser.add_argument(
         "--verbose",
         "-v",
         action="store_true",
@@ -133,6 +142,7 @@ def main():
             content_df=content_df,
             algorithms=args.algorithms,
             k_values=args.k_values,
+            min_items_per_user=args.min_items_per_user,
             output_dir=args.output_dir,
         )
         
@@ -151,7 +161,10 @@ def main():
         # Single evaluation
         logger.info("Running global evaluation...")
         
-        pipeline = RecPackPipeline(k_values=args.k_values)
+        pipeline = RecPackPipeline(
+            k_values=args.k_values,
+            min_items_per_user=args.min_items_per_user,
+        )
         
         # Save interactions temporarily
         import tempfile
