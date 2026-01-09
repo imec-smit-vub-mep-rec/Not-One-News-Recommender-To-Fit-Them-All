@@ -177,3 +177,6 @@ datasets/
 #adressa/
 #helpers/
 results/
+
+runs/*
+data/*
