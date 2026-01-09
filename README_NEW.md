@@ -29,6 +29,11 @@ pip install -r requirements.txt
 ## Quick Start
 
 ### Full Pipeline
+If needed: combine ebnerd train + validation into one behaviors.parquet file:
+
+```bash
+python scripts/combine_behaviors.py --input-dir data/ebnerd/ebnerd_large
+```
 
 Run the complete pipeline with a single command:
 
@@ -40,7 +45,7 @@ python scripts/run_full_pipeline.py --dataset adressa --input-dir /path/to/adres
 python scripts/run_full_pipeline.py --config my_config.json
 
 # With specific options
-python scripts/run_full_pipeline.py --dataset ebnerd --input-dir /path/to/data --n-clusters 5
+python scripts/run_full_pipeline.py --dataset ebnerd --input-dir data/ebnerd/ebnerd_small --n-clusters 5
 ```
 
 ### Step-by-Step

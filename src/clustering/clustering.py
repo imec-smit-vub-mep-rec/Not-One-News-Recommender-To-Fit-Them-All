@@ -5,11 +5,15 @@ Provides K-Means clustering and utilities for finding optimal cluster count.
 """
 
 from typing import Dict, List, Optional, Tuple, Any
+import os
 import pandas as pd
 import numpy as np
 from sklearn.cluster import KMeans, MiniBatchKMeans
 from sklearn.metrics import silhouette_score, calinski_harabasz_score, davies_bouldin_score
 import warnings
+
+# Auto-detect optimal number of jobs for parallel processing
+N_JOBS = int(os.environ.get('SKLEARN_N_JOBS', -1))  # -1 = use all CPUs
 
 from ..utils.logging import get_logger
 
@@ -49,8 +53,8 @@ def find_optimal_k(
     for k in k_range:
         logger.info(f"Evaluating k={k}...")
         
-        # Fit k-means
-        kmeans = KMeans(n_clusters=k, random_state=random_state, n_init=n_init)
+        # Fit k-means with parallel processing
+        kmeans = KMeans(n_clusters=k, random_state=random_state, n_init=n_init, n_jobs=N_JOBS)
         labels = kmeans.fit_predict(X)
         
         # Compute metrics
@@ -125,8 +129,9 @@ def cluster_users(
     n_clusters: int,
     random_state: int = 42,
     n_init: int = 10,
-    use_minibatch: bool = False,
-    batch_size: int = 1024,
+    use_minibatch: Optional[bool] = None,
+    batch_size: int = 2048,
+    auto_minibatch_threshold: int = 50000,
 ) -> Tuple[np.ndarray, Any]:
     """Cluster users using K-Means.
     
@@ -135,13 +140,22 @@ def cluster_users(
         n_clusters: Number of clusters
         random_state: Random state for reproducibility
         n_init: Number of initializations
-        use_minibatch: Whether to use MiniBatchKMeans (faster for large datasets)
+        use_minibatch: Whether to use MiniBatchKMeans (None = auto-detect based on dataset size)
         batch_size: Batch size for MiniBatchKMeans
+        auto_minibatch_threshold: Use MiniBatchKMeans if n_samples exceeds this (default 50k)
         
     Returns:
         Tuple of (cluster_labels, fitted_model)
     """
-    logger.info(f"Clustering {len(X)} users into {n_clusters} clusters...")
+    n_samples = len(X)
+    
+    # Auto-detect minibatch usage for large datasets
+    if use_minibatch is None:
+        use_minibatch = n_samples > auto_minibatch_threshold
+        if use_minibatch:
+            logger.info(f"Auto-enabled MiniBatchKMeans for {n_samples:,} samples (threshold: {auto_minibatch_threshold:,})")
+    
+    logger.info(f"Clustering {n_samples:,} users into {n_clusters} clusters...")
     
     if use_minibatch:
         model = MiniBatchKMeans(
@@ -155,6 +169,7 @@ def cluster_users(
             n_clusters=n_clusters,
             random_state=random_state,
             n_init=n_init,
+            n_jobs=N_JOBS,  # Parallel processing for SageMaker
         )
     
     labels = model.fit_predict(X)

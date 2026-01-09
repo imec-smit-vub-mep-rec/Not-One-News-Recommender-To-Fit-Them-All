@@ -211,11 +211,15 @@ class SentenceTransformerContentBased(Algorithm):
         
         self._log(f"Found content for {len(item_ids)}/{num_items} items")
         
-        # Encode item content
+        # Encode item content with GPU batching for efficiency
         if content_texts:
+            # Use larger batch size on GPU, smaller on CPU
+            batch_size = 128 if self.model.device.type == 'cuda' else 32
             embeddings = self.model.encode(
                 content_texts,
                 show_progress_bar=self.verbose,
+                batch_size=batch_size,
+                convert_to_numpy=True,
             )
             
             self._item_embeddings = dict(zip(item_ids, embeddings))
