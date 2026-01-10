@@ -413,6 +413,23 @@ def run_evaluation(
         logger.error("RecPack may not be installed. Install with: pip install recpack")
         return {}
     
+    # Check for pre-calculated embeddings file
+    embeddings_df = None
+    embedding_column = 'google-bert/bert-base-multilingual-cased'
+    
+    input_path = Path(config.dataset.input_path)
+    embeddings_path = input_path / "article_embeddings_bert.parquet"
+    
+    if embeddings_path.exists():
+        logger.info(f"Found pre-calculated embeddings at {embeddings_path}")
+        import pandas as pd
+        embeddings_df = pd.read_parquet(embeddings_path)
+        logger.info(f"Loaded embeddings for {len(embeddings_df)} articles")
+        logger.info(f"Using embedding column: '{embedding_column}'")
+    else:
+        logger.info(f"No pre-calculated embeddings found at {embeddings_path}")
+        logger.info("CB-ST will encode articles at runtime (this may be slow)")
+    
     # Run evaluation per cluster
     results_dir = session.get_path("evaluation_results")
     
@@ -428,6 +445,8 @@ def run_evaluation(
         min_items_per_user=config.clustering.min_impressions_per_user,  # Filter only at evaluation
         output_dir=results_dir,
         n_jobs=-1,  # Parallel cluster evaluation
+        embeddings_df=embeddings_df,
+        embedding_column=embedding_column,
     )
     
     # Analyze results

@@ -145,6 +145,8 @@ def run_evaluation(
     seed: int = 42,
     content_df: Optional[pd.DataFrame] = None,
     item_mapping: Optional[Dict] = None,
+    embeddings_df: Optional[pd.DataFrame] = None,
+    embedding_column: str = 'google-bert/bert-base-multilingual-cased',
 ) -> pd.DataFrame:
     """Run evaluation for multiple algorithms.
     
@@ -157,6 +159,9 @@ def run_evaluation(
         seed: Random seed
         content_df: DataFrame with article content for CB algorithms
         item_mapping: Item ID mapping for CB algorithms
+        embeddings_df: Optional DataFrame with pre-calculated embeddings.
+                       If provided, CB-ST will use these instead of encoding content.
+        embedding_column: Column name in embeddings_df containing the embedding vectors.
         
     Returns:
         DataFrame with evaluation results
@@ -220,7 +225,7 @@ def run_evaluation(
         
         if algo_name in ('CB-ST', 'CB-ST-sklearn', 'CB-ST-annoy', 'SentenceTransformerContentBased'):
             # Content-based algorithm needs special initialization - handle separately
-            if content_df is not None and item_mapping is not None:
+            if (content_df is not None or embeddings_df is not None) and item_mapping is not None:
                 # Determine backend
                 if algo_name == 'CB-ST-sklearn':
                     backend = 'sklearn'
@@ -232,12 +237,18 @@ def run_evaluation(
                     backend = 'sklearn'  # Default to sklearn
                     display_name = 'CB-ST'
                 
+                # Use pre-calculated embeddings if available
                 cb_algo_instances[display_name] = algo_class(
-                    content=content_df,
+                    content=content_df if content_df is not None else {},
                     item_mapping=item_mapping,
                     backend=backend,
+                    embeddings=embeddings_df,
+                    embedding_column=embedding_column,
                 )
-                logger.info(f"Created {display_name} with {backend} backend")
+                if embeddings_df is not None:
+                    logger.info(f"Created {display_name} with {backend} backend (using pre-calculated embeddings)")
+                else:
+                    logger.info(f"Created {display_name} with {backend} backend")
             else:
                 logger.warning("Content-based algorithm requires content_df and item_mapping")
         else:
@@ -342,6 +353,8 @@ class RecPackPipeline:
         validation_split: float = 0.1,
         test_split: float = 0.1,
         seed: int = 42,
+        embeddings_df: Optional[pd.DataFrame] = None,
+        embedding_column: str = 'google-bert/bert-base-multilingual-cased',
     ):
         """Initialize the pipeline.
         
@@ -352,6 +365,8 @@ class RecPackPipeline:
             validation_split: Fraction for validation set
             test_split: Fraction for test set
             seed: Random seed
+            embeddings_df: Optional DataFrame with pre-calculated embeddings
+            embedding_column: Column name in embeddings_df containing embeddings
         """
         check_recpack_available()
         
@@ -361,6 +376,8 @@ class RecPackPipeline:
         self.validation_split = validation_split
         self.test_split = test_split
         self.seed = seed
+        self.embeddings_df = embeddings_df
+        self.embedding_column = embedding_column
         
         self.interaction_matrix: Optional[Any] = None
         self.preprocessing_info: Optional[Dict] = None
@@ -434,6 +451,8 @@ class RecPackPipeline:
             seed=self.seed,
             content_df=self.content_df,
             item_mapping=item_mapping,
+            embeddings_df=self.embeddings_df,
+            embedding_column=self.embedding_column,
         )
         
         return self.results
@@ -475,6 +494,8 @@ def _evaluate_single_cluster(
     k_values: List[int],
     min_items_per_user: int,
     output_dir: Optional[str],
+    embeddings_df: Optional[pd.DataFrame] = None,
+    embedding_column: str = 'google-bert/bert-base-multilingual-cased',
 ) -> Tuple[int, Optional[pd.DataFrame]]:
     """Evaluate a single cluster. Helper for parallel execution.
     
@@ -486,6 +507,8 @@ def _evaluate_single_cluster(
         k_values: List of k values for metrics
         min_items_per_user: Minimum items per user for RecPack filter
         output_dir: Optional directory to save results
+        embeddings_df: Optional DataFrame with pre-calculated embeddings
+        embedding_column: Column name containing embeddings
         
     Returns:
         Tuple of (cluster_id, results DataFrame or None if skipped)
@@ -501,7 +524,12 @@ def _evaluate_single_cluster(
         return cluster_id, None
     
     # Run pipeline (min_items_per_user filtering happens here)
-    pipeline = RecPackPipeline(k_values=k_values, min_items_per_user=min_items_per_user)
+    pipeline = RecPackPipeline(
+        k_values=k_values,
+        min_items_per_user=min_items_per_user,
+        embeddings_df=embeddings_df,
+        embedding_column=embedding_column,
+    )
     
     # Create temporary files for the cluster data
     with tempfile.NamedTemporaryFile(mode='w', suffix='.csv', delete=False) as f:
@@ -550,6 +578,8 @@ def run_cluster_evaluation(
     min_items_per_user: int = 5,
     output_dir: Optional[str] = None,
     n_jobs: int = 1,
+    embeddings_df: Optional[pd.DataFrame] = None,
+    embedding_column: str = 'google-bert/bert-base-multilingual-cased',
 ) -> Dict[int, pd.DataFrame]:
     """Run evaluation for each user cluster.
     
@@ -571,6 +601,11 @@ def run_cluster_evaluation(
         output_dir: Optional directory to save results
         n_jobs: Number of parallel jobs (1 = sequential, -1 = all cores).
                 Note: Use n_jobs=1 if running on GPU to avoid memory issues.
+        embeddings_df: Optional DataFrame with pre-calculated embeddings.
+                       If provided, CB-ST algorithm will use these instead of encoding.
+                       This significantly speeds up evaluation on large datasets.
+        embedding_column: Column name in embeddings_df containing the embedding vectors.
+                         Default: 'google-bert/bert-base-multilingual-cased'
         
     Returns:
         Dictionary mapping cluster_id to results DataFrame
@@ -581,6 +616,8 @@ def run_cluster_evaluation(
     
     logger.info(f"Running evaluation for {len(cluster_ids)} clusters (n_jobs={n_jobs})...")
     logger.info(f"NOTE: Users with < {min_items_per_user} interactions will be filtered by RecPack")
+    if embeddings_df is not None:
+        logger.info(f"Using pre-calculated embeddings from column '{embedding_column}'")
     
     # Prepare cluster data
     cluster_data = {}
@@ -598,7 +635,8 @@ def run_cluster_evaluation(
         results_list = [
             _evaluate_single_cluster(
                 cluster_id, cluster_interactions, content_df,
-                algorithms, k_values, min_items_per_user, output_dir
+                algorithms, k_values, min_items_per_user, output_dir,
+                embeddings_df, embedding_column
             )
             for cluster_id, cluster_interactions in cluster_data.items()
         ]
@@ -608,7 +646,8 @@ def run_cluster_evaluation(
         results_list = Parallel(n_jobs=n_jobs)(
             delayed(_evaluate_single_cluster)(
                 cluster_id, cluster_interactions, content_df,
-                algorithms, k_values, min_items_per_user, output_dir
+                algorithms, k_values, min_items_per_user, output_dir,
+                embeddings_df, embedding_column
             )
             for cluster_id, cluster_interactions in cluster_data.items()
         )
