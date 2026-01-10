@@ -44,8 +44,11 @@ python scripts/run_full_pipeline.py --dataset adressa --input-dir /path/to/adres
 # Using a custom configuration file
 python scripts/run_full_pipeline.py --config my_config.json
 
+# Legacy features
+python scripts/run_full_pipeline.py --dataset ebnerd --input-dir ./data/ebnerd/ebnerd_large --legacy-features --n-clusters 4
+
 # With specific options
-python scripts/run_full_pipeline.py --dataset ebnerd --input-dir data/ebnerd/ebnerd_small --n-clusters 5
+python scripts/run_full_pipeline.py --dataset ebnerd --input-dir /data/ebnerd/ebnerd_small --n-clusters 5
 ```
 
 ### Step-by-Step

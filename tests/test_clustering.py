@@ -14,6 +14,7 @@ from src.clustering.feature_engineering import (
     create_time_features,
     create_activity_features,
     create_diversity_features,
+    create_session_behavior_features,
     scale_features,
     create_user_features,
     UserFeatureExtractor,
@@ -33,12 +34,14 @@ class TestFeatureEngineering:
     @pytest.fixture
     def sample_impressions(self):
         """Create sample impressions DataFrame."""
+        np.random.seed(42)
         return pd.DataFrame({
             'user_id': ['u1'] * 5 + ['u2'] * 3 + ['u3'] * 7,
             'article_id': [f'a{i%5}' for i in range(15)],
-            'category_str': ['news'] * 5 + ['sport'] * 3 + ['tech'] * 7,
-            'impression_time': np.random.randint(1000000000, 1700000000, 15),
+            'category_str': ['news', 'news', 'sport', 'news', 'sport'] + ['sport'] * 3 + ['tech'] * 7,
+            'impression_time': [1000000000 + i * 100 for i in range(15)],  # Sequential times
             'session_id': ['s1'] * 5 + ['s2'] * 3 + ['s3'] * 7,
+            'read_time': np.random.randint(10, 300, 15).astype(float),
         })
     
     def test_create_category_features(self, sample_impressions):
@@ -112,6 +115,110 @@ class TestFeatureEngineering:
         X = extractor.get_feature_matrix(features)
         assert X.shape[0] == 3
         assert X.shape[1] == len(feature_names)
+    
+    def test_create_session_behavior_features(self, sample_impressions):
+        """Test session behavior feature creation."""
+        result = create_session_behavior_features(sample_impressions)
+        
+        assert 'user_id' in result.columns
+        assert 'avg_reading_time' in result.columns
+        assert 'avg_session_length' in result.columns
+        assert 'avg_categories_per_session' in result.columns
+        assert 'avg_category_switches' in result.columns
+        assert 'avg_session_duration' in result.columns
+        assert len(result) == 3  # 3 unique users
+        
+        # Check that values are non-negative
+        for col in ['avg_reading_time', 'avg_session_length', 'avg_session_duration']:
+            assert (result[col] >= 0).all()
+    
+    def test_create_session_behavior_features_category_switches(self, sample_impressions):
+        """Test that category switches are computed correctly."""
+        result = create_session_behavior_features(sample_impressions)
+        
+        # User u1 has categories: news, news, sport, news, sport -> 3 switches
+        u1_switches = result[result['user_id'] == 'u1']['avg_category_switches'].values[0]
+        assert u1_switches == 3.0  # 3 switches in one session, avg = 3
+        
+        # User u2 has all sport -> 0 switches
+        u2_switches = result[result['user_id'] == 'u2']['avg_category_switches'].values[0]
+        assert u2_switches == 0.0
+        
+        # User u3 has all tech -> 0 switches
+        u3_switches = result[result['user_id'] == 'u3']['avg_category_switches'].values[0]
+        assert u3_switches == 0.0
+    
+    def test_create_diversity_features_legacy_mode(self, sample_impressions):
+        """Test diversity features in legacy mode (only num_categories)."""
+        result = create_diversity_features(sample_impressions, legacy_mode=True)
+        
+        assert 'user_id' in result.columns
+        assert 'num_categories' in result.columns
+        # Legacy mode should NOT include entropy and gini
+        assert 'category_entropy' not in result.columns
+        assert 'category_gini' not in result.columns
+        assert len(result.columns) == 2  # user_id + num_categories
+    
+    def test_create_diversity_features_full_mode(self, sample_impressions):
+        """Test diversity features in full mode (includes entropy and gini)."""
+        result = create_diversity_features(sample_impressions, legacy_mode=False)
+        
+        assert 'user_id' in result.columns
+        assert 'num_categories' in result.columns
+        assert 'category_entropy' in result.columns
+        assert 'category_gini' in result.columns
+        assert len(result.columns) == 4  # user_id + 3 features
+    
+    def test_create_user_features_legacy_mode(self, sample_impressions):
+        """Test user feature creation in legacy mode."""
+        features, metadata = create_user_features(
+            sample_impressions,
+            legacy_mode=True,
+        )
+        
+        assert len(features) == 3  # 3 users
+        assert metadata['legacy_mode'] == True
+        
+        # Legacy mode should NOT have per-category proportions
+        feature_names = metadata['feature_columns']
+        cat_features = [f for f in feature_names if f.startswith('cat_')]
+        assert len(cat_features) == 0, "Legacy mode should not have per-category features"
+        
+        # Legacy mode should NOT have time-of-day features
+        time_features = [f for f in feature_names if f.startswith('time_')]
+        assert len(time_features) == 0, "Legacy mode should not have time-of-day features"
+        
+        # Legacy mode SHOULD have session behavior features
+        assert 'avg_reading_time' in feature_names
+        assert 'avg_session_length' in feature_names
+        assert 'avg_category_switches' in feature_names
+        assert 'avg_session_duration' in feature_names
+        
+        # Legacy mode should have num_categories but NOT entropy/gini
+        assert 'num_categories' in feature_names
+        assert 'category_entropy' not in feature_names
+        assert 'category_gini' not in feature_names
+    
+    def test_user_feature_extractor_legacy_mode(self, sample_impressions):
+        """Test UserFeatureExtractor class in legacy mode."""
+        extractor = UserFeatureExtractor(legacy_mode=True)
+        features = extractor.fit_transform(sample_impressions)
+        
+        assert extractor.is_fitted
+        assert len(features) == 3
+        
+        feature_names = extractor.get_feature_names()
+        
+        # Check legacy mode configuration
+        cat_features = [f for f in feature_names if f.startswith('cat_')]
+        assert len(cat_features) == 0, "Legacy mode should not have per-category features"
+        
+        time_features = [f for f in feature_names if f.startswith('time_')]
+        assert len(time_features) == 0, "Legacy mode should not have time-of-day features"
+        
+        # Legacy features should be present
+        assert 'avg_category_switches' in feature_names
+        assert 'avg_session_duration' in feature_names
 
 
 class TestClustering:

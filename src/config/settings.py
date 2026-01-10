@@ -53,6 +53,9 @@ class ClusteringConfig:
         imputation_strategy: Strategy for missing values ('mean', 'median', 'zero')
         min_impressions_per_user: Minimum impressions required per user
         k_selection_method: Method for selecting K ('elbow', 'silhouette', 'manual')
+        legacy_features: If True, use the legacy feature set (disables per-category
+                         proportions and time-of-day features, enables session behavior
+                         features like avg_category_switches and avg_session_duration)
     """
     features: List[str] = field(default_factory=lambda: [
         'count_sessions',
@@ -75,6 +78,7 @@ class ClusteringConfig:
     imputation_strategy: str = "mean"
     min_impressions_per_user: int = 5
     k_selection_method: str = "elbow"
+    legacy_features: bool = False
 
 
 @dataclass 

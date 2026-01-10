@@ -281,6 +281,7 @@ def create_diversity_features(
     user_col: str = 'user_id',
     category_col: str = 'category_str',
     article_col: str = 'article_id',
+    legacy_mode: bool = False,
 ) -> pd.DataFrame:
     """Create content diversity features per user.
     
@@ -291,6 +292,8 @@ def create_diversity_features(
         user_col: Name of user ID column
         category_col: Name of category column
         article_col: Name of article ID column
+        legacy_mode: If True, only return num_categories (skip entropy/gini)
+                     to match the legacy clustering feature set
         
     Returns:
         DataFrame with user_id and diversity columns
@@ -308,6 +311,16 @@ def create_diversity_features(
     # Number of unique categories per user
     num_categories = (user_cat_counts > 0).sum(axis=1)
     
+    if legacy_mode:
+        # Legacy mode: only return num_categories
+        result = pd.DataFrame({
+            user_col: user_cat_counts.index,
+            'num_categories': num_categories.values,
+        })
+        logger.info(f"Created 1 diversity feature (legacy mode) for {len(result)} users")
+        return result
+    
+    # Full mode: include entropy and gini
     # Convert to proportions for entropy calculation
     user_cat_props = user_cat_counts.div(user_cat_counts.sum(axis=1), axis=0)
     
@@ -336,6 +349,140 @@ def create_diversity_features(
     })
     
     logger.info(f"Created 3 diversity features for {len(result)} users")
+    
+    return result
+
+
+def create_session_behavior_features(
+    df: pd.DataFrame,
+    user_col: str = 'user_id',
+    session_col: str = 'session_id',
+    time_col: str = 'impression_time',
+    category_col: str = 'category_str',
+    read_time_col: str = 'read_time',
+    article_col: str = 'article_id',
+) -> pd.DataFrame:
+    """Create legacy session behavior features per user.
+    
+    These features match the legacy clustering pipeline and capture
+    session-level behavior patterns.
+    
+    Args:
+        df: Impressions DataFrame
+        user_col: Name of user ID column
+        session_col: Name of session ID column
+        time_col: Name of timestamp column
+        category_col: Name of category column
+        read_time_col: Name of read time column
+        article_col: Name of article ID column
+        
+    Returns:
+        DataFrame with user_id and session behavior columns:
+        - avg_reading_time: overall average reading time per user
+        - avg_session_length: average articles per session
+        - avg_categories_per_session: unique categories per session, averaged
+        - avg_category_switches: category switches within sessions, averaged
+        - avg_session_duration: session duration in seconds, averaged
+    """
+    logger.info("Creating session behavior features...")
+    
+    df = df.copy()
+    
+    # Get unique users
+    users = df[user_col].unique()
+    
+    # 1. avg_reading_time: overall average reading time per user
+    if read_time_col in df.columns:
+        avg_reading_time = df.groupby(user_col)[read_time_col].mean()
+    else:
+        avg_reading_time = pd.Series(0, index=users)
+    
+    # Initialize result with users
+    result = pd.DataFrame({user_col: users})
+    result = result.set_index(user_col)
+    result['avg_reading_time'] = avg_reading_time.reindex(result.index, fill_value=0)
+    
+    # Session-based features (require session_col)
+    if session_col in df.columns:
+        # 2. avg_session_length: average articles per session
+        # Count article impressions per session (exclude homepage views)
+        article_mask = df[article_col].notna() if article_col in df.columns else pd.Series(True, index=df.index)
+        articles_per_session = df[article_mask].groupby([user_col, session_col]).size()
+        avg_session_length = articles_per_session.groupby(user_col).mean()
+        result['avg_session_length'] = avg_session_length.reindex(result.index, fill_value=0)
+        
+        # 3. avg_categories_per_session: unique categories per session, averaged
+        if category_col in df.columns:
+            # Filter for valid categories (non-empty, non-null)
+            valid_cat_mask = (df[category_col].notna()) & (df[category_col] != '')
+            valid_df = df[valid_cat_mask]
+            
+            if len(valid_df) > 0:
+                cats_per_session = valid_df.groupby([user_col, session_col])[category_col].nunique()
+                avg_cats_per_session = cats_per_session.groupby(user_col).mean()
+                result['avg_categories_per_session'] = avg_cats_per_session.reindex(result.index, fill_value=0)
+            else:
+                result['avg_categories_per_session'] = 0
+            
+            # 4. avg_category_switches: category switches within sessions, averaged
+            # Sort by time within each session, count transitions where category changes
+            sorted_df = valid_df.sort_values([user_col, session_col, time_col])
+            
+            # Compute switches per session
+            switches_list = []
+            for (uid, sid), group in sorted_df.groupby([user_col, session_col]):
+                categories = group[category_col].values
+                if len(categories) > 1:
+                    # Count transitions where category changes
+                    switches = sum(1 for i in range(1, len(categories)) if categories[i] != categories[i-1])
+                else:
+                    switches = 0
+                switches_list.append({user_col: uid, session_col: sid, 'switches': switches})
+            
+            if switches_list:
+                switches_df = pd.DataFrame(switches_list)
+                avg_switches = switches_df.groupby(user_col)['switches'].mean()
+                result['avg_category_switches'] = avg_switches.reindex(result.index, fill_value=0)
+            else:
+                result['avg_category_switches'] = 0
+        else:
+            result['avg_categories_per_session'] = 0
+            result['avg_category_switches'] = 0
+        
+        # 5. avg_session_duration: session duration in seconds, averaged
+        if time_col in df.columns:
+            # Convert to datetime if needed for duration calculation
+            time_data = df[time_col]
+            
+            # Handle milliseconds vs seconds
+            if time_data.dtype in ['int64', 'float64']:
+                divisor = 1000 if time_data.max() > 10**12 else 1
+                time_seconds = time_data / divisor
+            else:
+                # Convert datetime to seconds since epoch
+                time_seconds = pd.to_datetime(time_data).astype('int64') / 1e9
+            
+            df['_time_seconds'] = time_seconds
+            
+            # Calculate session duration: max - min time per session
+            session_duration = df.groupby([user_col, session_col])['_time_seconds'].agg(
+                lambda x: x.max() - x.min()
+            )
+            avg_session_duration = session_duration.groupby(user_col).mean()
+            result['avg_session_duration'] = avg_session_duration.reindex(result.index, fill_value=0)
+        else:
+            result['avg_session_duration'] = 0
+    else:
+        # No session column - fill with zeros
+        result['avg_session_length'] = 0
+        result['avg_categories_per_session'] = 0
+        result['avg_category_switches'] = 0
+        result['avg_session_duration'] = 0
+    
+    result = result.reset_index()
+    result = result.fillna(0)
+    
+    logger.info(f"Created 5 session behavior features for {len(result)} users")
     
     return result
 
@@ -390,6 +537,8 @@ def create_user_features(
     include_activity: bool = True,
     include_diversity: bool = True,
     include_homepage: bool = True,
+    include_session_behavior: bool = False,
+    legacy_mode: bool = False,
     scale: bool = True,
     user_col: str = 'user_id',
 ) -> Tuple[pd.DataFrame, Dict[str, Any]]:
@@ -400,19 +549,35 @@ def create_user_features(
     Args:
         impressions_df: Impressions DataFrame (should include homepage views for homepage features)
         articles_df: Optional articles DataFrame (for category info)
-        include_categories: Whether to include category features
-        include_time: Whether to include time features
+        include_categories: Whether to include category features (per-category proportions)
+        include_time: Whether to include time features (time-of-day preferences)
         include_activity: Whether to include activity features
-        include_diversity: Whether to include diversity features
+        include_diversity: Whether to include diversity features (entropy, gini)
         include_homepage: Whether to include homepage behavior features.
                           These capture the distinction between homepage browsers
                           vs article readers, matching the legacy clustering behavior.
+        include_session_behavior: Whether to include session behavior features
+                                  (avg_reading_time, avg_session_length, avg_categories_per_session,
+                                  avg_category_switches, avg_session_duration)
+        legacy_mode: If True, automatically configure for legacy feature set:
+                     - Disable category proportions (include_categories=False)
+                     - Disable time features (include_time=False)
+                     - Enable session behavior (include_session_behavior=True)
+                     - Use legacy diversity mode (only num_categories)
         scale: Whether to scale features
         user_col: Name of user ID column
         
     Returns:
         Tuple of (features DataFrame, metadata dict)
     """
+    # Apply legacy mode overrides
+    if legacy_mode:
+        logger.info("Legacy mode enabled - using legacy feature set")
+        include_categories = False
+        include_time = False
+        include_session_behavior = True
+        # legacy_mode will also be passed to diversity features
+    
     logger.info("Creating user features...")
     
     # Merge with articles if needed for category
@@ -427,15 +592,15 @@ def create_user_features(
     # Get unique users as base
     features = df[[user_col]].drop_duplicates().reset_index(drop=True)
     
-    metadata = {'feature_groups': {}}
+    metadata = {'feature_groups': {}, 'legacy_mode': legacy_mode}
     
-    # Category features
+    # Category features (per-category proportions - NOT in legacy)
     if include_categories and 'category_str' in df.columns:
         cat_features = create_category_features(df, user_col)
         features = features.merge(cat_features, on=user_col, how='left')
         metadata['feature_groups']['category'] = [c for c in cat_features.columns if c != user_col]
     
-    # Time features
+    # Time features (time-of-day preferences - NOT in legacy)
     if include_time and 'impression_time' in df.columns:
         time_features = create_time_features(df, user_col)
         features = features.merge(time_features, on=user_col, how='left')
@@ -453,9 +618,15 @@ def create_user_features(
         features = features.merge(homepage_features, on=user_col, how='left')
         metadata['feature_groups']['homepage'] = [c for c in homepage_features.columns if c != user_col]
     
+    # Session behavior features (legacy features)
+    if include_session_behavior:
+        session_features = create_session_behavior_features(df, user_col)
+        features = features.merge(session_features, on=user_col, how='left')
+        metadata['feature_groups']['session_behavior'] = [c for c in session_features.columns if c != user_col]
+    
     # Diversity features
     if include_diversity and 'category_str' in df.columns:
-        diversity_features = create_diversity_features(df, user_col)
+        diversity_features = create_diversity_features(df, user_col, legacy_mode=legacy_mode)
         features = features.merge(diversity_features, on=user_col, how='left')
         metadata['feature_groups']['diversity'] = [c for c in diversity_features.columns if c != user_col]
     
@@ -491,19 +662,28 @@ class UserFeatureExtractor:
         include_activity: bool = True,
         include_diversity: bool = True,
         include_homepage: bool = True,
+        include_session_behavior: bool = False,
+        legacy_mode: bool = False,
         scale: bool = True,
         user_col: str = 'user_id',
     ):
         """Initialize the feature extractor.
         
         Args:
-            include_categories: Whether to include category features
-            include_time: Whether to include time features
+            include_categories: Whether to include category features (per-category proportions)
+            include_time: Whether to include time features (time-of-day preferences)
             include_activity: Whether to include activity features
-            include_diversity: Whether to include diversity features
+            include_diversity: Whether to include diversity features (entropy, gini)
             include_homepage: Whether to include homepage behavior features.
                               These capture the distinction between homepage browsers
                               vs article readers, matching legacy clustering behavior.
+            include_session_behavior: Whether to include session behavior features
+                                      (avg_reading_time, avg_session_length, etc.)
+            legacy_mode: If True, automatically configure for legacy feature set:
+                         - Disable category proportions
+                         - Disable time features
+                         - Enable session behavior
+                         - Use legacy diversity mode (only num_categories)
             scale: Whether to scale features
             user_col: Name of user ID column
         """
@@ -512,6 +692,8 @@ class UserFeatureExtractor:
         self.include_activity = include_activity
         self.include_diversity = include_diversity
         self.include_homepage = include_homepage
+        self.include_session_behavior = include_session_behavior
+        self.legacy_mode = legacy_mode
         self.scale = scale
         self.user_col = user_col
         
@@ -540,6 +722,8 @@ class UserFeatureExtractor:
             include_activity=self.include_activity,
             include_diversity=self.include_diversity,
             include_homepage=self.include_homepage,
+            include_session_behavior=self.include_session_behavior,
+            legacy_mode=self.legacy_mode,
             scale=self.scale,
             user_col=self.user_col,
         )

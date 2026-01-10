@@ -5,6 +5,7 @@ from .feature_engineering import (
     create_user_features,
     create_category_features,
     create_time_features,
+    create_session_behavior_features,
     scale_features,
 )
 from .clustering import (
@@ -26,6 +27,7 @@ __all__ = [
     "create_user_features",
     "create_category_features",
     "create_time_features",
+    "create_session_behavior_features",
     "scale_features",
     # Clustering
     "KMeansClusterer",

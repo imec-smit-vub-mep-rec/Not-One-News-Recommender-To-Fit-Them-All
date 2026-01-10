@@ -70,6 +70,12 @@ def parse_args():
     )
     
     parser.add_argument(
+        "--legacy-features",
+        action="store_true",
+        help="Use legacy feature set for clustering (no per-category proportions, no time-of-day)",
+    )
+    
+    parser.add_argument(
         "--skip-conversion",
         action="store_true",
         help="Skip data conversion (use existing converted data)",
@@ -98,13 +104,27 @@ def parse_args():
 
 
 def load_or_create_config(args) -> PipelineConfig:
-    """Load config from file or create from arguments."""
-    from dataclasses import replace
+    """Load config from file or create from arguments.
     
+    Supports three modes:
+    1. --config alone: Load full config from JSON file
+    2. --dataset alone: Use preset config for known datasets
+    3. --dataset + --config: Use preset for dataset, merge clustering/evaluation from config file
+    """
+    from dataclasses import replace
+    import json
+    
+    config = None
+    config_overrides = {}
+    
+    # Load config file overrides if provided
     if args.config:
-        config = load_config(args.config)
-        logger.info(f"Loaded config from {args.config}")
-    elif args.dataset:
+        with open(args.config, 'r') as f:
+            config_overrides = json.load(f)
+        logger.info(f"Loaded config overrides from {args.config}")
+    
+    # Create base config from dataset preset or full config file
+    if args.dataset:
         if args.dataset in PRESET_CONFIGS:
             # PRESET_CONFIGS contains DatasetConfig objects, not full PipelineConfig
             # Use replace() to create a copy - never mutate the shared preset
@@ -115,6 +135,10 @@ def load_or_create_config(args) -> PipelineConfig:
             logger.info(f"Using preset config for {args.dataset}")
         else:
             raise ValueError(f"Unknown dataset: {args.dataset}")
+    elif args.config and 'dataset' in config_overrides:
+        # Full config from file
+        config = load_config(args.config)
+        config_overrides = {}  # Already loaded
     else:
         # Create default config
         from src.config import DatasetConfig, SessionConfig
@@ -122,7 +146,25 @@ def load_or_create_config(args) -> PipelineConfig:
             dataset=DatasetConfig(name="custom", input_path=args.input_dir or ""),
         )
     
-    # Override with command line args
+    # Apply config file overrides (for --dataset + --config case)
+    if config_overrides:
+        if 'clustering' in config_overrides:
+            for key, value in config_overrides['clustering'].items():
+                if hasattr(config.clustering, key):
+                    setattr(config.clustering, key, value)
+                    logger.info(f"Config override: clustering.{key} = {value}")
+        if 'evaluation' in config_overrides:
+            for key, value in config_overrides['evaluation'].items():
+                if hasattr(config.evaluation, key):
+                    setattr(config.evaluation, key, value)
+                    logger.info(f"Config override: evaluation.{key} = {value}")
+        if 'session' in config_overrides:
+            for key, value in config_overrides['session'].items():
+                if hasattr(config.session, key):
+                    setattr(config.session, key, value)
+                    logger.info(f"Config override: session.{key} = {value}")
+    
+    # Override with command line args (highest priority)
     if args.input_dir:
         config.dataset.input_path = args.input_dir
     
@@ -131,6 +173,11 @@ def load_or_create_config(args) -> PipelineConfig:
     
     if args.n_clusters:
         config.clustering.n_clusters = args.n_clusters
+    
+    # --legacy-features flag takes highest priority
+    if args.legacy_features:
+        config.clustering.legacy_features = True
+        logger.info("CLI override: clustering.legacy_features = True")
     
     return config
 
@@ -270,6 +317,11 @@ def run_clustering(
     logger.info("STEP 3: User Clustering (ALL users including homepage-only)")
     logger.info("=" * 60)
     
+    # Check if legacy features mode is enabled
+    legacy_mode = getattr(config.clustering, 'legacy_features', False)
+    if legacy_mode:
+        logger.info("Using LEGACY feature set (no per-category proportions, no time-of-day, with session behavior features)")
+    
     # Extract features (including homepage behavior - matching legacy clustering)
     extractor = UserFeatureExtractor(
         include_categories=True,
@@ -277,6 +329,7 @@ def run_clustering(
         include_activity=True,
         include_diversity=True,
         include_homepage=True,  # Homepage behavior is a clustering signal (legacy behavior)
+        legacy_mode=legacy_mode,  # Use legacy feature set if configured
         scale=True,
     )
     
@@ -410,6 +463,21 @@ def main():
     except Exception as e:
         logger.error(f"Failed to load config: {e}")
         sys.exit(1)
+    
+    # Log feature configuration
+    logger.info("=" * 60)
+    logger.info("CONFIGURATION SUMMARY")
+    logger.info("=" * 60)
+    logger.info(f"Dataset: {config.dataset.name}")
+    logger.info(f"Input path: {config.dataset.input_path}")
+    legacy_features = getattr(config.clustering, 'legacy_features', False)
+    if legacy_features:
+        logger.info("Feature mode: LEGACY (session behavior features, no per-category proportions, no time-of-day)")
+    else:
+        logger.info("Feature mode: MODERN (includes per-category proportions, time-of-day, entropy/gini)")
+    logger.info(f"N clusters: {config.clustering.n_clusters or 'auto-detect'}")
+    logger.info(f"K selection method: {config.clustering.k_selection_method}")
+    logger.info("=" * 60)
     
     # Create session using the config
     session = Session(config=config)
