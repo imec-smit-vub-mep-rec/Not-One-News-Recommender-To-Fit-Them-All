@@ -243,7 +243,11 @@ def create_homepage_features(
         )
         
         # Total reading time per user (for proportion calculation)
-        total_reading_time = df.groupby(user_col)[read_time_col].sum()
+        total_reading_time = (
+            df.groupby(user_col)[read_time_col]
+            .sum()
+            .reindex(total_counts.index, fill_value=0)
+        )
         
         # Article reading time per user
         article_reading_time = (

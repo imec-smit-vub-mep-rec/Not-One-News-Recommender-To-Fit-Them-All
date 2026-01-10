@@ -132,9 +132,9 @@ def find_optimal_k(
     
     # Find optimal k
     if method == 'silhouette':
-        # Maximum silhouette score
-        valid_scores = [s for s in metrics['silhouette_scores'] if not np.isnan(s)]
-        optimal_idx = metrics['silhouette_scores'].index(max(valid_scores))
+        # Maximum silhouette score (use nanargmax to handle NaN values correctly)
+        sil_scores = np.array(metrics['silhouette_scores'])
+        optimal_idx = int(np.nanargmax(sil_scores))
         optimal_k = metrics['k_values'][optimal_idx]
         
     elif method == 'elbow':

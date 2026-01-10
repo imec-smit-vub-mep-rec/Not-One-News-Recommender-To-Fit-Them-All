@@ -99,16 +99,18 @@ def parse_args():
 
 def load_or_create_config(args) -> PipelineConfig:
     """Load config from file or create from arguments."""
+    from dataclasses import replace
+    
     if args.config:
         config = load_config(args.config)
         logger.info(f"Loaded config from {args.config}")
     elif args.dataset:
         if args.dataset in PRESET_CONFIGS:
             # PRESET_CONFIGS contains DatasetConfig objects, not full PipelineConfig
+            # Use replace() to create a copy - never mutate the shared preset
             preset = PRESET_CONFIGS[args.dataset]
-            # Set input_path from command line
             if args.input_dir:
-                preset.input_path = args.input_dir
+                preset = replace(preset, input_path=args.input_dir)
             config = PipelineConfig(dataset=preset)
             logger.info(f"Using preset config for {args.dataset}")
         else:
