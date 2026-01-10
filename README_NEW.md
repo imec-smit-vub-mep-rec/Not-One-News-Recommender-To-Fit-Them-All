@@ -333,3 +333,16 @@ If you use this code, please cite:
   url={repository-url}
 }
 ```
+
+
+## Command dump
+```bash
+python scripts/run_full_pipeline.py --dataset ebnerd --input-dir ./data/ebnerd/ebnerd_large --legacy-features --n-clusters 4
+
+python scripts/run_full_pipeline.py --dataset ebnerd --input-dir ./data/ebnerd/ebnerd_small --legacy-features
+
+
+wget https://ebnerd-dataset.s3.eu-west-1.amazonaws.com/artifacts/google_bert_base_multilingual_cased.zip
+unzip google_bert_base_multilingual_cased.zip -d article_embeddings_bert_folder
+rm google_bert_base_multilingual_cased.zip
+```
