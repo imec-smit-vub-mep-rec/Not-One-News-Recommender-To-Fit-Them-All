@@ -415,6 +415,6 @@ python scripts/generate_embeddings.py --input-dir ./data/ebnerd/ebnerd_large --b
 ```
 
 ```bash
-python scripts/generate_embeddings.py --input-dir ./data/adressa_adressa_one_week
-python scripts/run_full_pipeline.py --dataset ./data/adressa_adressa_one_week --legacy-features --n-clusters 3
+python scripts/generate_embeddings.py --input-dir ./data/adressa/one_week
+python scripts/run_full_pipeline.py --dataset ./data/adressa/one_week --legacy-features --n-clusters 3
 ```

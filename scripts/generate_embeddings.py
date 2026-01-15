@@ -100,6 +100,51 @@ def find_articles_file(input_dir: str) -> Optional[Path]:
     return None
 
 
+def extract_articles_from_adressa(input_dir: str):
+    """Extract articles from Adressa JSONL files on the fly.
+    
+    Args:
+        input_dir: Input directory containing JSONL files
+        
+    Returns:
+        DataFrame with articles
+    """
+    from src.converters.adressa import AdressaConverter
+    from src.config.settings import DatasetConfig
+    import glob
+    
+    # Check if there are JSONL files
+    jsonl_files = glob.glob(str(Path(input_dir) / "*.jsonl"))
+    if not jsonl_files:
+        return None
+        
+    logger.info(f"Found {len(jsonl_files)} JSONL files. Extracting articles using AdressaConverter...")
+    
+    # Create temp config
+    config = DatasetConfig(
+        name="adressa",
+        input_path=input_dir,
+        format="jsonl"
+    )
+    
+    # Run conversion
+    converter = AdressaConverter(config)
+    
+    # Adressa converter builds article map during impression processing
+    logger.info("Scanning impressions to build article catalog (this may take a while)...")
+    converter.convert_impressions() 
+    
+    # Get articles
+    articles_df = converter.convert_articles()
+    
+    if len(articles_df) == 0:
+        logger.warning("No articles extracted from Adressa data")
+        return None
+        
+    logger.info(f"Extracted {len(articles_df)} articles from raw data")
+    return articles_df
+
+
 def create_content_strings(articles_df, category_col: str = 'category_str', title_col: str = 'title'):
     """Create content strings in the format '{category}: {title}'.
     
@@ -226,17 +271,36 @@ def main():
     
     # Find articles file
     articles_path = find_articles_file(args.input_dir)
-    if articles_path is None:
-        logger.error(f"Could not find articles.parquet in {args.input_dir}")
-        logger.error("Looked in: root, train/, validation/ subdirectories")
-        sys.exit(1)
+    articles_df = None
     
-    logger.info(f"Found articles file: {articles_path}")
-    
-    # Load articles
-    logger.info("Loading articles...")
-    articles_df = load_dataframe(str(articles_path))
-    logger.info(f"Loaded {len(articles_df)} articles")
+    if articles_path is not None:
+        logger.info(f"Found articles file: {articles_path}")
+        
+        # Load articles
+        logger.info("Loading articles...")
+        articles_df = load_dataframe(str(articles_path))
+        logger.info(f"Loaded {len(articles_df)} articles")
+        
+    else:
+        logger.info(f"Could not find articles.parquet in {args.input_dir}")
+        logger.info("Checking for raw Adressa data...")
+        
+        # Try to extract from Adressa raw files
+        articles_df = extract_articles_from_adressa(args.input_dir)
+        
+        if articles_df is None:
+            logger.error(f"Could not find articles.parquet or valid Adressa JSONL files in {args.input_dir}")
+            logger.error("Looked in: root, train/, validation/ subdirectories")
+            sys.exit(1)
+            
+        # Optional: Save extracted articles to avoid re-extraction
+        try:
+            output_articles_path = Path(args.input_dir) / "articles.parquet"
+            if not output_articles_path.exists():
+                logger.info(f"Saving extracted articles to {output_articles_path} for future use...")
+                save_dataframe(articles_df, str(output_articles_path))
+        except Exception as e:
+            logger.warning(f"Could not save articles.parquet: {e}")
     
     # Check required columns
     if 'article_id' not in articles_df.columns:
