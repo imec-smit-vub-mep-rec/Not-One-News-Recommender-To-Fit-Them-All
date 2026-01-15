@@ -211,17 +211,25 @@ def run_conversion(config: PipelineConfig, session: Session) -> tuple:
             config=config.dataset,
         )
     
-    # Convert articles
-    logger.info("Converting articles...")
-    articles_df = converter.convert_articles()
+    if dataset_format == "jsonl" or config.dataset.name == "adressa":
+        # Adressa articles are extracted during impression processing.
+        logger.info("Converting impressions (required before articles for Adressa)...")
+        impressions_df = converter.convert_impressions()
+        
+        logger.info("Converting articles...")
+        articles_df = converter.convert_articles()
+    else:
+        # Convert articles
+        logger.info("Converting articles...")
+        articles_df = converter.convert_articles()
+        
+        # Convert impressions
+        logger.info("Converting impressions...")
+        impressions_df = converter.convert_impressions()
     
     articles_path = session.get_path("articles.parquet")
     save_dataframe(articles_df, articles_path)
     logger.info(f"Saved {len(articles_df)} articles to {articles_path}")
-    
-    # Convert impressions
-    logger.info("Converting impressions...")
-    impressions_df = converter.convert_impressions()
     
     impressions_path = session.get_path("impressions.parquet")
     save_dataframe(impressions_df, impressions_path)
