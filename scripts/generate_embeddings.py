@@ -115,21 +115,25 @@ def create_content_strings(articles_df, category_col: str = 'category_str', titl
     """
     import pandas as pd
     
-    # Handle missing columns
+    # Check for category column aliases
     if category_col not in articles_df.columns:
-        logger.warning(f"Column '{category_col}' not found, using empty string")
-        articles_df = articles_df.copy()
-        articles_df[category_col] = ''
+        if 'category' in articles_df.columns:
+            logger.info(f"Column '{category_col}' not found, using 'category' instead")
+            category_col = 'category'
+        else:
+            logger.warning(f"Column '{category_col}' not found, using empty string")
+            articles_df = articles_df.copy()
+            articles_df[category_col] = ''
     
     if title_col not in articles_df.columns:
         raise ValueError(f"Column '{title_col}' not found in articles DataFrame")
     
-    # Fill NA values
+    # Fill NA values and ensure string type
     categories = articles_df[category_col].fillna('').astype(str)
     titles = articles_df[title_col].fillna('').astype(str)
     
     # Create content strings: "query: {category}: {title}"
-    # The "query: " prefix is important for e5 models
+    # The "query: " prefix is important for e5 models and matches legacy Adressa format
     content = "query: " + categories + ": " + titles
     
     return content

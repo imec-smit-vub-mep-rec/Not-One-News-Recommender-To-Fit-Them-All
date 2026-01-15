@@ -413,3 +413,8 @@ python scripts/generate_embeddings.py --input-dir ./data/ebnerd/ebnerd_large --m
 # Generate embeddings with GPU (larger batch size)
 python scripts/generate_embeddings.py --input-dir ./data/ebnerd/ebnerd_large --batch-size 128
 ```
+
+```bash
+python scripts/generate_embeddings.py --input-dir ./data/adressa_adressa_one_week
+python scripts/run_full_pipeline.py --dataset ./data/adressa_adressa_one_week --legacy-features --n-clusters 3
+```
