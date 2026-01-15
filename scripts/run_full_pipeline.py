@@ -94,6 +94,12 @@ def parse_args():
     )
     
     parser.add_argument(
+        "--full-content",
+        action="store_true",
+        help="Use full article content (title + body) for CB-ST instead of just category + title (legacy default)",
+    )
+    
+    parser.add_argument(
         "--verbose",
         "-v",
         action="store_true",
@@ -229,6 +235,7 @@ def run_preprocessing(
     impressions_df,
     config: PipelineConfig,
     session: Session,
+    full_content: bool = False,
 ) -> tuple:
     """Run preprocessing step for CLUSTERING.
     
@@ -289,7 +296,9 @@ def run_preprocessing(
     logger.info(f"NOTE: interactions.csv excludes homepage views (for RecPack evaluation)")
     
     # Create article content for content-based
-    content_df = articles_to_content(cleaned_articles)
+    # Default: category + title only (legacy behavior)
+    # With full_content=True: category + title + body (richer but slower)
+    content_df = articles_to_content(cleaned_articles, full_content=full_content)
     
     content_path = session.get_path("articles_content.csv")
     save_dataframe(content_df, content_path, format="csv")
@@ -399,6 +408,9 @@ def run_evaluation(
     happens on ALL users, while evaluation only includes users with enough
     interactions for meaningful recommendations.
     
+    IMPORTANT: Pre-calculated embeddings are REQUIRED for CB-ST algorithm.
+    Generate them first with: python scripts/generate_embeddings.py --input-dir <path>
+    
     Returns:
         Dictionary of results per cluster
     """
@@ -413,12 +425,16 @@ def run_evaluation(
         logger.error("RecPack may not be installed. Install with: pip install recpack")
         return {}
     
-    # Check for pre-calculated embeddings file
+    # Check for pre-calculated embeddings file (REQUIRED for CB-ST)
     embeddings_df = None
-    embedding_column = 'google-bert/bert-base-multilingual-cased'
+    embedding_column = 'embedding'  # Column name from generate_embeddings.py
     
     input_path = Path(config.dataset.input_path)
-    embeddings_path = input_path / "article_embeddings_bert.parquet"
+    embeddings_path = input_path / "title_category_embeddings.parquet"
+    
+    # Check if CB-ST is in the enabled algorithms
+    algorithm_names = [algo.name for algo in config.evaluation.algorithms if algo.enabled]
+    cb_st_enabled = any(name in ('CB-ST', 'SentenceTransformerContentBased') for name in algorithm_names)
     
     if embeddings_path.exists():
         logger.info(f"Found pre-calculated embeddings at {embeddings_path}")
@@ -426,9 +442,25 @@ def run_evaluation(
         embeddings_df = pd.read_parquet(embeddings_path)
         logger.info(f"Loaded embeddings for {len(embeddings_df)} articles")
         logger.info(f"Using embedding column: '{embedding_column}'")
+    elif cb_st_enabled:
+        # CB-ST requires pre-calculated embeddings - throw error
+        logger.error("=" * 60)
+        logger.error("ERROR: Pre-calculated embeddings are REQUIRED for CB-ST")
+        logger.error("=" * 60)
+        logger.error(f"Expected file: {embeddings_path}")
+        logger.error("")
+        logger.error("Generate embeddings first with:")
+        logger.error(f"  python scripts/generate_embeddings.py --input-dir {input_path}")
+        logger.error("")
+        logger.error("Or disable CB-ST by removing it from the algorithms list.")
+        logger.error("=" * 60)
+        raise FileNotFoundError(
+            f"Pre-calculated embeddings required for CB-ST but not found at {embeddings_path}. "
+            f"Generate with: python scripts/generate_embeddings.py --input-dir {input_path}"
+        )
     else:
         logger.info(f"No pre-calculated embeddings found at {embeddings_path}")
-        logger.info("CB-ST will encode articles at runtime (this may be slow)")
+        logger.info("CB-ST is not enabled, continuing without embeddings")
     
     # Run evaluation per cluster
     results_dir = session.get_path("evaluation_results")
@@ -496,6 +528,10 @@ def main():
         logger.info("Feature mode: MODERN (includes per-category proportions, time-of-day, entropy/gini)")
     logger.info(f"N clusters: {config.clustering.n_clusters or 'auto-detect'}")
     logger.info(f"K selection method: {config.clustering.k_selection_method}")
+    if args.full_content:
+        logger.info("CB-ST content: FULL (category + title + body)")
+    else:
+        logger.info("CB-ST content: LEGACY (category + title only)")
     logger.info("=" * 60)
     
     # Create session using the config
@@ -517,7 +553,8 @@ def main():
         
         # Step 2: Preprocessing
         articles_df, impressions_df, interactions_df = run_preprocessing(
-            articles_df, impressions_df, config, session
+            articles_df, impressions_df, config, session,
+            full_content=args.full_content,
         )
         
         # Step 3: Clustering

@@ -29,14 +29,18 @@ pip install -r requirements.txt
 ## Quick Start
 
 ### Full Pipeline
-If needed: combine ebnerd train + validation into one behaviors.parquet file:
 
+**Step 1:** (Optional) Combine EB-NeRD train + validation behaviors:
 ```bash
 python scripts/combine_behaviors.py --input-dir data/ebnerd/ebnerd_large
 ```
 
-Run the complete pipeline with a single command:
+**Step 2:** Generate embeddings for CB-ST (required, run once per dataset):
+```bash
+python scripts/generate_embeddings.py --input-dir ./data/ebnerd/ebnerd_large
+```
 
+**Step 3:** Run the complete pipeline:
 ```bash
 # Using a preset dataset configuration
 python scripts/run_full_pipeline.py --dataset adressa --input-dir /path/to/adressa/data
@@ -44,7 +48,7 @@ python scripts/run_full_pipeline.py --dataset adressa --input-dir /path/to/adres
 # Using a custom configuration file
 python scripts/run_full_pipeline.py --config my_config.json
 
-# Legacy features
+# Legacy features with 4 clusters
 python scripts/run_full_pipeline.py --dataset ebnerd --input-dir ./data/ebnerd/ebnerd_large --legacy-features --n-clusters 4
 
 # With specific options
@@ -260,7 +264,61 @@ Create a JSON configuration file:
 - **EASE**: Embarrassingly Shallow Autoencoders
 
 ### Content-Based
-- **CB-ST**: Sentence Transformer embeddings with Annoy index
+- **CB-ST**: Sentence Transformer embeddings with Annoy approximate nearest neighbors
+
+#### Pre-calculated Embeddings (REQUIRED for CB-ST)
+
+CB-ST **requires** pre-calculated embeddings. Generate them before running the pipeline:
+
+```bash
+# Generate embeddings (run once per dataset)
+python scripts/generate_embeddings.py --input-dir ./data/ebnerd/ebnerd_large
+
+# This creates: ./data/ebnerd/ebnerd_large/title_category_embeddings.parquet
+```
+
+The embedding format is `{category}: {title}` matching the legacy content-based approach.
+
+**Generated file structure:**
+```
+data/ebnerd/ebnerd_large/
+├── articles.parquet
+├── behaviors.parquet
+└── title_category_embeddings.parquet  # Generated embeddings (REQUIRED)
+```
+
+**Schema for `title_category_embeddings.parquet`:**
+| Column | Type | Description |
+|--------|------|-------------|
+| `article_id` | Int32 | Article identifier |
+| `embedding` | List[Float] | Embedding vector (1024-dim for e5-large) |
+
+If the embeddings file is missing and CB-ST is enabled, the pipeline will throw an error with instructions.
+
+#### Apple Silicon Warning ⚠️
+
+CB-ST uses the **Annoy** backend by default for fast approximate nearest neighbor search. However, **Annoy has a known bug on Apple Silicon (M1/M2/M3/M4 Macs)** where it may only return 1 neighbor regardless of how many are requested.
+
+If you experience poor CB-ST results on Apple Silicon, you can switch to the sklearn backend by modifying the algorithm configuration or using `CB-ST-sklearn` instead of `CB-ST`.
+
+## Evaluation Methodology
+
+### Scenario: LastItemPrediction
+
+The pipeline uses RecPack's **LastItemPrediction** scenario (matching legacy behavior):
+- For each user, the **last interaction** is held out for testing
+- All **earlier interactions** are used for training
+- This evaluates how well algorithms predict what a user will read next based on their history
+
+### Data Filtering (Legacy Parity)
+
+To match the legacy pipeline, the following filters are applied:
+
+1. **Session Bot Filter**: Sessions with >50 interactions are removed (likely bots)
+2. **Minimum User Activity**: Users with <5 article interactions are filtered for RecPack evaluation
+3. **Empty Article Removal**: Impressions without valid article_id are removed for evaluation (but kept for clustering to capture homepage behavior)
+
+The session filter can be disabled by passing `max_impressions_per_session=None` to the `DataCleaner`.
 
 ## Output
 
@@ -337,12 +395,21 @@ If you use this code, please cite:
 
 ## Command dump
 ```bash
+# Step 0: Combine behaviors if needed (EB-NeRD only)
+python scripts/combine_behaviors.py --input-dir data/ebnerd/ebnerd_large
+
+# Step 1: Generate embeddings (REQUIRED for CB-ST) - run once per dataset
+python scripts/generate_embeddings.py --input-dir ./data/ebnerd/ebnerd_large
+
+# Step 2: Run full pipeline
 python scripts/run_full_pipeline.py --dataset ebnerd --input-dir ./data/ebnerd/ebnerd_large --legacy-features --n-clusters 4
 
+# Small dataset test
 python scripts/run_full_pipeline.py --dataset ebnerd --input-dir ./data/ebnerd/ebnerd_small --legacy-features
 
+# Generate embeddings with different model
+python scripts/generate_embeddings.py --input-dir ./data/ebnerd/ebnerd_large --model intfloat/multilingual-e5-base
 
-wget https://ebnerd-dataset.s3.eu-west-1.amazonaws.com/artifacts/google_bert_base_multilingual_cased.zip
-unzip google_bert_base_multilingual_cased.zip -d article_embeddings_bert_folder
-rm google_bert_base_multilingual_cased.zip
+# Generate embeddings with GPU (larger batch size)
+python scripts/generate_embeddings.py --input-dir ./data/ebnerd/ebnerd_large --batch-size 128
 ```

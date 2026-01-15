@@ -97,19 +97,27 @@ def articles_to_content(
     article_col: str = 'article_id',
     category_col: str = 'category_str',
     title_col: str = 'title',
+    body_col: str = 'body',
     template: str = 'query: {category}: {title}',
+    full_content: bool = False,
 ) -> pd.DataFrame:
     """Create content strings for content-based recommendations.
     
-    Combines category and title into a single content string
-    suitable for sentence transformer embedding.
+    By default, combines category and title into a single content string
+    suitable for sentence transformer embedding (matching legacy behavior).
+    
+    With full_content=True, includes the article body for richer embeddings.
     
     Args:
         articles_df: Articles DataFrame
         article_col: Name of article ID column
         category_col: Name of category column
         title_col: Name of title column
-        template: Template for combining fields. Use {category} and {title} placeholders.
+        body_col: Name of body/text column (used only if full_content=True)
+        template: Template for combining fields. Use {category}, {title}, {body} placeholders.
+                  Default: 'query: {category}: {title}' (legacy format)
+        full_content: If True, use full content template with body.
+                      If False (default), use legacy template (category + title only).
         
     Returns:
         DataFrame with article_id and content columns
@@ -117,6 +125,13 @@ def articles_to_content(
     logger.info("Creating article content strings...")
     
     df = articles_df.copy()
+    
+    # Override template if full_content is requested
+    if full_content:
+        template = 'query: {category}: {title}. {body}'
+        logger.info("Using FULL CONTENT mode (category + title + body)")
+    else:
+        logger.info("Using LEGACY mode (category + title only)")
     
     # Ensure columns exist
     if category_col not in df.columns:
@@ -127,15 +142,26 @@ def articles_to_content(
         logger.warning(f"Column '{title_col}' not found, using empty string")
         df[title_col] = ''
     
+    if body_col not in df.columns:
+        if full_content:
+            logger.warning(f"Column '{body_col}' not found, using empty string for body")
+        df[body_col] = ''
+    
     # Fill NA values
     df[category_col] = df[category_col].fillna('').astype(str)
     df[title_col] = df[title_col].fillna('').astype(str)
+    df[body_col] = df[body_col].fillna('').astype(str)
+    
+    # Truncate body to avoid overly long content (limit to ~500 chars like legacy)
+    if full_content:
+        df[body_col] = df[body_col].str[:500]
     
     # Create content strings
     content = df.apply(
         lambda row: template.format(
             category=row[category_col],
-            title=row[title_col]
+            title=row[title_col],
+            body=row[body_col] if full_content else ''
         ),
         axis=1
     )

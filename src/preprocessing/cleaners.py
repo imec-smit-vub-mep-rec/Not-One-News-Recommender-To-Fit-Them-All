@@ -69,13 +69,19 @@ def remove_empty_articles(
 def remove_invalid_sessions(
     df: pd.DataFrame,
     min_impressions: int = 2,
+    max_impressions: Optional[int] = None,
     session_col: str = 'session_id',
 ) -> pd.DataFrame:
-    """Remove sessions with too few impressions.
+    """Remove sessions with too few or too many impressions.
+    
+    The max_impressions filter is useful for removing bot-like sessions.
+    The legacy pipeline used max_impressions=50 to filter outlier sessions.
     
     Args:
         df: Impressions DataFrame
         min_impressions: Minimum impressions per session
+        max_impressions: Maximum impressions per session (None = no limit).
+                        Set to 50 to match legacy behavior (bot filter).
         session_col: Name of the session ID column
         
     Returns:
@@ -87,8 +93,14 @@ def remove_invalid_sessions(
     # Count impressions per session
     session_counts = df.groupby(session_col).size()
     
-    # Find valid sessions
-    valid_sessions = session_counts[session_counts >= min_impressions].index
+    # Find valid sessions (min filter)
+    mask = session_counts >= min_impressions
+    
+    # Apply max filter if specified (bot filter from legacy code)
+    if max_impressions is not None:
+        mask &= session_counts <= max_impressions
+    
+    valid_sessions = session_counts[mask].index
     
     # Filter
     df = df[df[session_col].isin(valid_sessions)].copy()
@@ -96,7 +108,10 @@ def remove_invalid_sessions(
     removed_sessions = initial_sessions - df[session_col].nunique()
     removed_impressions = initial_count - len(df)
     
-    logger.info(f"Removed {removed_sessions} sessions with < {min_impressions} impressions")
+    if max_impressions is not None:
+        logger.info(f"Removed {removed_sessions} sessions with impressions not in [{min_impressions}, {max_impressions}]")
+    else:
+        logger.info(f"Removed {removed_sessions} sessions with < {min_impressions} impressions")
     logger.info(f"Removed {removed_impressions} impressions total")
     
     return df
@@ -292,6 +307,7 @@ class DataCleaner:
         min_impressions_per_user: int = 5,
         max_impressions_per_user: Optional[int] = None,
         min_impressions_per_session: int = 1,
+        max_impressions_per_session: Optional[int] = 50,  # Legacy bot filter
         remove_empty_articles: bool = True,
         clean_categories: bool = True,
         remove_duplicates: bool = True,
@@ -303,6 +319,9 @@ class DataCleaner:
             min_impressions_per_user: Minimum impressions per user (only applied if filter_users=True)
             max_impressions_per_user: Maximum impressions per user (only applied if filter_users=True)
             min_impressions_per_session: Minimum impressions per session
+            max_impressions_per_session: Maximum impressions per session (default: 50).
+                          This filters out bot-like sessions, matching legacy behavior.
+                          Set to None to disable.
             remove_empty_articles: Whether to remove impressions with empty/null article_id.
                           Set to False for clustering to keep homepage views as a signal.
                           The legacy code keeps homepage impressions for clustering.
@@ -315,6 +334,7 @@ class DataCleaner:
         self.min_impressions_per_user = min_impressions_per_user
         self.max_impressions_per_user = max_impressions_per_user
         self.min_impressions_per_session = min_impressions_per_session
+        self.max_impressions_per_session = max_impressions_per_session
         self.remove_empty_articles_flag = remove_empty_articles
         self.clean_categories_flag = clean_categories
         self.remove_duplicates = remove_duplicates
@@ -351,9 +371,15 @@ class DataCleaner:
         if self.remove_duplicates:
             df = remove_duplicate_impressions(df)
         
-        # Remove invalid sessions
-        if self.min_impressions_per_session > 1 and 'session_id' in df.columns:
-            df = remove_invalid_sessions(df, self.min_impressions_per_session)
+        # Remove invalid sessions (including bot filter with max_impressions_per_session)
+        # This matches legacy behavior: sessions with >50 impressions are filtered out
+        if 'session_id' in df.columns:
+            if self.min_impressions_per_session > 1 or self.max_impressions_per_session is not None:
+                df = remove_invalid_sessions(
+                    df, 
+                    self.min_impressions_per_session,
+                    self.max_impressions_per_session
+                )
         
         # Remove outlier users (only if filter_users is enabled)
         # NOTE: For clustering, this should be DISABLED to cluster ALL users.

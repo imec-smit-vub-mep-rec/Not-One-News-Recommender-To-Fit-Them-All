@@ -20,7 +20,7 @@ logger = get_logger("evaluation.recpack_pipeline")
 try:
     from recpack.preprocessing.preprocessors import DataFramePreprocessor
     from recpack.preprocessing.filters import MinItemsPerUser, MinUsersPerItem
-    from recpack.scenarios import StrongGeneralizationTimed
+    from recpack.scenarios import LastItemPrediction
     from recpack.pipelines import PipelineBuilder
     from recpack.algorithms import Popularity, ItemKNN, EASE
     from recpack.matrix import InteractionMatrix
@@ -140,22 +140,26 @@ def run_evaluation(
     interaction_matrix: Any,
     algorithms: Optional[List[str]] = None,
     k_values: List[int] = [10, 20, 50],
-    validation_split: float = 0.1,
-    test_split: float = 0.1,
+    validation_split: float = 0.1,  # Deprecated: not used with LastItemPrediction
+    test_split: float = 0.1,  # Deprecated: not used with LastItemPrediction
     seed: int = 42,
     content_df: Optional[pd.DataFrame] = None,
     item_mapping: Optional[Dict] = None,
     embeddings_df: Optional[pd.DataFrame] = None,
-    embedding_column: str = 'google-bert/bert-base-multilingual-cased',
+    embedding_column: str = 'embedding',
 ) -> pd.DataFrame:
-    """Run evaluation for multiple algorithms.
+    """Run evaluation for multiple algorithms using LastItemPrediction scenario.
+    
+    Uses LastItemPrediction scenario (matching legacy behavior) where each user's
+    last interaction is held out for testing and earlier interactions are used
+    for training.
     
     Args:
         interaction_matrix: RecPack InteractionMatrix
         algorithms: List of algorithm names (None = all available)
         k_values: List of k values for metrics
-        validation_split: Fraction for validation set
-        test_split: Fraction for test set
+        validation_split: DEPRECATED - not used with LastItemPrediction
+        test_split: DEPRECATED - not used with LastItemPrediction
         seed: Random seed
         content_df: DataFrame with article content for CB algorithms
         item_mapping: Item ID mapping for CB algorithms
@@ -176,28 +180,12 @@ def run_evaluation(
     logger.info(f"Running evaluation for algorithms: {algorithms}")
     logger.info(f"Metrics will be computed for k = {k_values}")
     
-    # Set up scenario - calculate split timestamps based on the range of timestamps
-    ts_min = interaction_matrix.timestamps.min()
-    ts_max = interaction_matrix.timestamps.max()
-    ts_range = ts_max - ts_min
-    
-    if ts_range == 0:
-        logger.warning("All timestamps are identical, cannot create temporal split")
-        logger.warning("Returning empty results for this subset")
-        return pd.DataFrame()
-    
-    # Split timestamps: 80% train, 10% validation, 10% test
-    t_validation = int(ts_min + ts_range * (1 - validation_split - test_split))
-    t_test = int(ts_min + ts_range * (1 - test_split))
-    
-    logger.info(f"Timestamp range: {ts_min} to {ts_max} (range: {ts_range})")
-    logger.info(f"Split timestamps: t_validation={t_validation}, t_test={t_test}")
+    # Use LastItemPrediction scenario (matches legacy behavior)
+    # This predicts the last item each user interacted with, using all earlier items for training
+    logger.info("Using LastItemPrediction scenario (legacy behavior)")
     
     try:
-        scenario = StrongGeneralizationTimed(
-            frac_users_in=0.8,  # 80% of users for training
-            t=t_test,
-            t_validation=t_validation,
+        scenario = LastItemPrediction(
             validation=True,
             seed=seed,
         )
@@ -234,7 +222,7 @@ def run_evaluation(
                     backend = 'annoy'
                     display_name = 'CB-ST-annoy'
                 else:
-                    backend = 'sklearn'  # Default to sklearn
+                    backend = 'annoy'  # Default to annoy (faster)
                     display_name = 'CB-ST'
                 
                 # Use pre-calculated embeddings if available
@@ -354,7 +342,7 @@ class RecPackPipeline:
         test_split: float = 0.1,
         seed: int = 42,
         embeddings_df: Optional[pd.DataFrame] = None,
-        embedding_column: str = 'google-bert/bert-base-multilingual-cased',
+        embedding_column: str = 'embedding',
     ):
         """Initialize the pipeline.
         
@@ -495,7 +483,7 @@ def _evaluate_single_cluster(
     min_items_per_user: int,
     output_dir: Optional[str],
     embeddings_df: Optional[pd.DataFrame] = None,
-    embedding_column: str = 'google-bert/bert-base-multilingual-cased',
+    embedding_column: str = 'embedding',
 ) -> Tuple[int, Optional[pd.DataFrame]]:
     """Evaluate a single cluster. Helper for parallel execution.
     
@@ -579,7 +567,7 @@ def run_cluster_evaluation(
     output_dir: Optional[str] = None,
     n_jobs: int = 1,
     embeddings_df: Optional[pd.DataFrame] = None,
-    embedding_column: str = 'google-bert/bert-base-multilingual-cased',
+    embedding_column: str = 'embedding',
 ) -> Dict[int, pd.DataFrame]:
     """Run evaluation for each user cluster.
     
