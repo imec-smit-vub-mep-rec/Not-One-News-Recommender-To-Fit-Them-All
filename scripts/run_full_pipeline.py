@@ -17,18 +17,96 @@ import argparse
 import sys
 from pathlib import Path
 from datetime import datetime
+import ast
+import json
 
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.config import PipelineConfig, load_config, save_config, PRESET_CONFIGS
 from src.utils import Session, setup_logging, get_logger, load_dataframe, save_dataframe
-from src.converters import AdressaConverter, EBNeRDConverter, GenericConverter
+from src.converters import ADConverter, AdressaConverter, EBNeRDConverter, GenericConverter
 from src.preprocessing import DataCleaner, DataValidator, behaviors_to_interactions, articles_to_content
 from src.clustering import UserFeatureExtractor, KMeansClusterer, ClusterVisualizer
 
 
 logger = get_logger("pipeline")
+
+
+def _parse_embedding(raw_value):
+    """Parse embedding values from article metadata into list[float]."""
+    if raw_value is None:
+        return None
+    text = str(raw_value).strip()
+    if not text:
+        return None
+
+    # JSON-style arrays
+    try:
+        parsed = json.loads(text)
+        if isinstance(parsed, list) and parsed:
+            return [float(x) for x in parsed]
+    except Exception:
+        pass
+
+    # Python literal arrays/tuples
+    try:
+        parsed = ast.literal_eval(text)
+        if isinstance(parsed, (list, tuple)) and parsed:
+            return [float(x) for x in parsed]
+    except Exception:
+        pass
+
+    # Space-separated values in bracketed strings
+    cleaned = text.strip("[]")
+    values = []
+    for token in cleaned.replace(",", " ").split():
+        try:
+            values.append(float(token))
+        except ValueError:
+            continue
+    return values if values else None
+
+
+def _save_session_embeddings_if_available(articles_df, config: PipelineConfig, session: Session):
+    """
+    Save session-local title_category_embeddings.parquet if AD raw embeddings exist.
+
+    This keeps evaluation logic local-file based and avoids direct S3 Path.exists checks.
+    """
+    if config.dataset.name != "ad":
+        return
+    if "bert_embedding" not in articles_df.columns:
+        logger.info("AD dataset detected but no 'bert_embedding' column found in articles")
+        return
+
+    parsed = articles_df["bert_embedding"].map(_parse_embedding)
+    valid_mask = parsed.notna()
+    if not valid_mask.any():
+        logger.warning("No valid embeddings parsed from 'bert_embedding' column")
+        return
+
+    embeddings_df = articles_df.loc[valid_mask, ["article_id"]].copy()
+    embeddings_df["article_id"] = embeddings_df["article_id"].astype(str)
+    embeddings_df["embedding"] = parsed.loc[valid_mask]
+
+    # Keep only rows with consistent embedding length
+    lengths = embeddings_df["embedding"].map(len)
+    target_dim = int(lengths.mode().iloc[0])
+    consistent_mask = lengths.eq(target_dim)
+    dropped = int((~consistent_mask).sum())
+    if dropped:
+        logger.warning(
+            f"Dropping {dropped} embedding rows with non-standard dimension (target={target_dim})"
+        )
+        embeddings_df = embeddings_df.loc[consistent_mask].copy()
+
+    embedding_path = session.get_path("title_category_embeddings.parquet")
+    save_dataframe(embeddings_df, embedding_path)
+    logger.info(
+        f"Saved {len(embeddings_df)} session embeddings to {embedding_path} "
+        f"(dimension={target_dim})"
+    )
 
 
 def parse_args():
@@ -47,7 +125,7 @@ def parse_args():
     parser.add_argument(
         "--dataset",
         type=str,
-        choices=["adressa", "ebnerd", "custom"],
+        choices=["ad", "adressa", "ebnerd", "custom"],
         help="Dataset type (uses preset config)",
     )
     
@@ -202,7 +280,9 @@ def run_conversion(config: PipelineConfig, session: Session) -> tuple:
     input_path = config.dataset.input_path
     
     # Select converter
-    if dataset_format == "jsonl" or config.dataset.name == "adressa":
+    if config.dataset.name == "ad":
+        converter = ADConverter(config=config.dataset)
+    elif dataset_format == "jsonl" or config.dataset.name == "adressa":
         converter = AdressaConverter(config=config.dataset)
     elif dataset_format == "parquet" or config.dataset.name == "ebnerd":
         converter = EBNeRDConverter(config=config.dataset)
@@ -234,6 +314,8 @@ def run_conversion(config: PipelineConfig, session: Session) -> tuple:
     impressions_path = session.get_path("impressions.parquet")
     save_dataframe(impressions_df, impressions_path)
     logger.info(f"Saved {len(impressions_df)} impressions to {impressions_path}")
+
+    _save_session_embeddings_if_available(articles_df, config, session)
     
     return articles_df, impressions_df
 
@@ -437,6 +519,7 @@ def run_evaluation(
     embeddings_df = None
     embedding_column = 'embedding'  # Column name from generate_embeddings.py
     
+    session_embeddings_path = session.get_path("title_category_embeddings.parquet")
     input_path = Path(config.dataset.input_path)
     embeddings_path = input_path / "title_category_embeddings.parquet"
     
@@ -444,7 +527,13 @@ def run_evaluation(
     algorithm_names = [algo.name for algo in config.evaluation.algorithms if algo.enabled]
     cb_st_enabled = any(name in ('CB-ST', 'SentenceTransformerContentBased') for name in algorithm_names)
     
-    if embeddings_path.exists():
+    if Path(session_embeddings_path).exists():
+        logger.info(f"Found session embeddings at {session_embeddings_path}")
+        import pandas as pd
+        embeddings_df = pd.read_parquet(session_embeddings_path)
+        logger.info(f"Loaded embeddings for {len(embeddings_df)} articles")
+        logger.info(f"Using embedding column: '{embedding_column}'")
+    elif embeddings_path.exists():
         logger.info(f"Found pre-calculated embeddings at {embeddings_path}")
         import pandas as pd
         embeddings_df = pd.read_parquet(embeddings_path)

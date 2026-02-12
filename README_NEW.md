@@ -253,8 +253,131 @@ Create a JSON configuration file:
 
 ### Preset Configurations
 
+- `ad`: Large AD dataset exported by Spark (S3 partitioned CSV)
 - `adressa`: Norwegian news dataset (Adressa)
 - `ebnerd`: Danish news dataset (EB-NeRD/Ekstra Bladet)
+
+## Running Large AD Data on SageMaker (S3)
+
+This section covers the high-memory SageMaker workflow for the Spark-written AD dataset.
+
+### Expected S3 Layout
+
+```
+s3://<bucket>/<prefix>/ad/
+├── article_metadata.csv
+└── impressions/
+    ├── event_type=home_page_view/
+    │   └── part-*.csv
+    └── event_type=article_page_view/
+        └── part-*.csv
+```
+
+The converter reads the partition root (`impressions/`) with `awswrangler` and automatically includes the `event_type` partition column.
+
+### SageMaker Prerequisites
+
+#### 1) IAM permissions
+
+Your SageMaker execution role needs:
+- `s3:ListBucket` on the dataset bucket/prefix
+- `s3:GetObject` on dataset objects
+- Optional: `s3:PutObject` if you sync results back to S3
+
+#### 2) Instance sizing
+
+For very large CSV exports, start with high-memory instances:
+- Recommended start: `ml.r5.8xlarge` (256 GiB RAM)
+- If out-of-memory: `ml.r5.16xlarge` (512 GiB RAM)
+- EBS volume: 200-500 GB (depending on run artifacts)
+
+#### 3) Install dependencies
+
+```bash
+pip install -r requirements.txt
+```
+
+`awswrangler` is required for S3 partitioned reads.
+
+### Quick Run (Preset Mode)
+
+```bash
+python scripts/run_full_pipeline.py \
+  --dataset ad \
+  --input-dir s3://<bucket>/<prefix>/ad \
+  --legacy-features \
+  --n-clusters 4
+```
+
+### Reproducible Run (Config File Mode)
+
+Create `config_ad_s3.json`:
+
+```json
+{
+  "dataset": {
+    "name": "ad",
+    "input_path": "s3://<bucket>/<prefix>/ad",
+    "format": "spark_csv",
+    "event_types": ["home_page_view", "article_page_view"],
+    "start_time_min": null,
+    "start_time_max": null
+  },
+  "clustering": {
+    "n_clusters": 4,
+    "k_selection_method": "elbow",
+    "legacy_features": true
+  },
+  "evaluation": {
+    "k_values": [10, 20, 50]
+  }
+}
+```
+
+Run:
+
+```bash
+python scripts/run_full_pipeline.py --dataset ad --config config_ad_s3.json
+```
+
+### Smoke Test Before Full Run (Recommended)
+
+Start with a small run first:
+1. Restrict to one partition via `event_types` (for example only `article_page_view`)
+2. Restrict time range with `start_time_min` and `start_time_max`
+3. Use fewer clusters
+4. Skip evaluation initially:
+
+```bash
+python scripts/run_full_pipeline.py \
+  --dataset ad \
+  --input-dir s3://<bucket>/<prefix>/ad \
+  --n-clusters 3 \
+  --skip-evaluation
+```
+
+Then remove limits for the full run.
+
+### Embeddings for CB-ST on AD
+
+AD includes `bert_embedding` in `article_metadata.csv`.
+During conversion, the pipeline parses these embeddings and writes:
+
+`runs/<run_id>/data/title_category_embeddings.parquet`
+
+Evaluation uses this session-local embeddings file first, so no separate `generate_embeddings.py` step is required for AD.
+
+### Outputs and Optional S3 Sync
+
+By default outputs are written locally under:
+
+`runs/<dataset>_<timestamp>/`
+
+Optional sync back to S3:
+
+```bash
+aws s3 sync runs/ s3://<bucket>/<results-prefix>/runs/
+```
 
 ## Algorithms
 

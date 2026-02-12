@@ -9,6 +9,7 @@ scipy>=1.10.0
 
 # Data I/O
 pyarrow>=10.0.0      # For parquet support
+awswrangler>=3.0.0   # For S3 partitioned dataset reads on SageMaker
 
 # Recommendation evaluation
 recpack>=0.3.0

@@ -34,6 +34,10 @@ class DatasetConfig:
     session_timeout_seconds: int = 1800  # 30 minutes
     min_impressions_per_user: int = 5
     min_users_per_item: int = 1
+    # Optional ingestion controls for large partitioned datasets (e.g. AD on S3).
+    event_types: Optional[List[str]] = None
+    start_time_min: Optional[str] = None
+    start_time_max: Optional[str] = None
     
     def __post_init__(self):
         if not self.output_path:
@@ -298,6 +302,23 @@ def save_config(config: PipelineConfig, config_path: str) -> None:
 
 # Preset configurations for common datasets
 PRESET_CONFIGS = {
+    'ad': DatasetConfig(
+        name='ad',
+        input_path='',
+        format='spark_csv',
+        column_mapping={
+            'ARTICLE_IDENTIFIER': 'article_id',
+            'MAPPED_USER_IDENTIFIER': 'user_id',
+            'START_TIME': 'impression_time',
+            'IMPRESSION_ID': 'impression_id',
+            'TIME_ON_PAGE': 'read_time',
+            'SESSION_ID': 'session_id',
+            'IS_LOGGED_IN': 'is_subscriber',
+            'main_section': 'category_str',
+            'title': 'title',
+        },
+        event_types=['home_page_view', 'article_page_view'],
+    ),
     'adressa': DatasetConfig(
         name='adressa',
         input_path='',
