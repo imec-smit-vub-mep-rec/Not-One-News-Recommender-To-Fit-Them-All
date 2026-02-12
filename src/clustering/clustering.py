@@ -25,6 +25,8 @@ def _fit_kmeans_for_k(
     n_init: int,
     use_minibatch: bool = False,
     batch_size: int = 2048,
+    compute_extra_metrics: bool = True,
+    silhouette_sample_size: int = 10000,
 ) -> Dict[str, Any]:
     """Fit KMeans for a single k value and compute metrics.
     
@@ -37,6 +39,11 @@ def _fit_kmeans_for_k(
         n_init: Number of initializations
         use_minibatch: Whether to use MiniBatchKMeans
         batch_size: Batch size for MiniBatchKMeans
+        compute_extra_metrics: Whether to compute silhouette/CH/DB scores
+            (not needed for elbow method which only uses inertia)
+        silhouette_sample_size: Subsample size for silhouette_score.
+            Full pairwise silhouette is O(n²) and infeasible for large datasets.
+            Set to 0 or None to use all samples (WARNING: very slow for n > 50k).
         
     Returns:
         Dictionary with k value and computed metrics
@@ -59,8 +66,12 @@ def _fit_kmeans_for_k(
         'inertia': kmeans.inertia_,
     }
     
-    if k > 1:
-        result['silhouette_score'] = silhouette_score(X, labels)
+    if k > 1 and compute_extra_metrics:
+        # Silhouette score is O(n²) — subsample for large datasets
+        sil_sample = silhouette_sample_size if (silhouette_sample_size and len(X) > silhouette_sample_size) else None
+        result['silhouette_score'] = silhouette_score(
+            X, labels, sample_size=sil_sample, random_state=random_state,
+        )
         result['calinski_harabasz_score'] = calinski_harabasz_score(X, labels)
         result['davies_bouldin_score'] = davies_bouldin_score(X, labels)
     else:
@@ -108,12 +119,21 @@ def find_optimal_k(
         use_minibatch = True
         logger.info(f"Auto-enabled MiniBatchKMeans for K-selection ({n_samples:,} > {minibatch_threshold:,} samples)")
     
-    logger.info(f"Finding optimal k in range {k_list} using {method} method (parallel, n_jobs={n_jobs})...")
+    # Elbow method only needs inertia — skip expensive O(n²) silhouette/CH/DB scores
+    compute_extra = method != 'elbow'
+    extra_info = ""
+    if compute_extra:
+        extra_info = " (with silhouette/CH/DB metrics, silhouette subsampled to 10k)"
+    else:
+        extra_info = " (inertia only — skipping O(n²) silhouette for speed)"
+    logger.info(f"Finding optimal k in range {k_list} using {method} method (parallel, n_jobs={n_jobs}){extra_info}...")
     
     # Run K-means fitting in parallel
     results = Parallel(n_jobs=n_jobs)(
         delayed(_fit_kmeans_for_k)(
-            X, k, random_state, n_init, use_minibatch, batch_size
+            X, k, random_state, n_init, use_minibatch, batch_size,
+            compute_extra_metrics=compute_extra,
+            silhouette_sample_size=10000,
         )
         for k in k_list
     )
