@@ -84,12 +84,11 @@ class ADConverter(BaseConverter):
 
     def _build_boto3_session(self):
         """
-        Build boto3 session from custom DPG env vars.
+        Configure AWS auth env vars from custom DPG env vars.
 
         Returns:
-            boto3.Session | None:
-                - Session when DPG credentials are provided
-                - None to let awswrangler use default AWS credential chain
+            None:
+                awswrangler will use environment/default credential chain.
         """
         access_key = os.getenv("DPG_ACCESS_KEY_ID")
         secret_key = os.getenv("DPG_SECRET_ACCESS_KEY")
@@ -108,28 +107,28 @@ class ADConverter(BaseConverter):
             )
             return None
 
-        try:
-            import boto3
-        except ImportError as exc:
-            raise ImportError("boto3 is required when using DPG_* credentials.") from exc
-
         # Try to auto-derive region from bucket location.
         region = None
         bucket = self._extract_bucket_from_s3_uri(self.config.input_path)
-        base_session = boto3.Session(
-            aws_access_key_id=access_key,
-            aws_secret_access_key=secret_key,
-            aws_session_token=session_token,
-        )
+        try:
+            import boto3
 
-        if bucket:
-            try:
-                s3_client = base_session.client("s3", region_name="us-east-1")
-                location = s3_client.get_bucket_location(Bucket=bucket).get("LocationConstraint")
-                region = "us-east-1" if location in (None, "") else location
-                self.logger.info(f"Derived AWS region from bucket '{bucket}': {region}")
-            except Exception as exc:
-                self.logger.warning(f"Could not derive region from bucket '{bucket}': {exc}")
+            base_session = boto3.Session(
+                aws_access_key_id=access_key,
+                aws_secret_access_key=secret_key,
+                aws_session_token=session_token,
+            )
+            if bucket:
+                try:
+                    s3_client = base_session.client("s3", region_name="us-east-1")
+                    location = s3_client.get_bucket_location(Bucket=bucket).get("LocationConstraint")
+                    region = "us-east-1" if location in (None, "") else location
+                    self.logger.info(f"Derived AWS region from bucket '{bucket}': {region}")
+                except Exception as exc:
+                    self.logger.warning(f"Could not derive region from bucket '{bucket}': {exc}")
+        except Exception:
+            # boto3 is optional here; we can still use fallback region/env credentials.
+            pass
 
         if not region:
             region = (
@@ -140,12 +139,16 @@ class ADConverter(BaseConverter):
             )
             self.logger.info(f"Using fallback AWS region: {region}")
 
-        return boto3.Session(
-            aws_access_key_id=access_key,
-            aws_secret_access_key=secret_key,
-            aws_session_token=session_token,
-            region_name=region,
-        )
+        # Ray engine in awswrangler does not support boto3_session argument.
+        # Expose credentials/region via standard AWS env vars instead.
+        os.environ.setdefault("AWS_ACCESS_KEY_ID", access_key)
+        os.environ.setdefault("AWS_SECRET_ACCESS_KEY", secret_key)
+        if session_token:
+            os.environ.setdefault("AWS_SESSION_TOKEN", session_token)
+        os.environ.setdefault("AWS_DEFAULT_REGION", region)
+        os.environ.setdefault("AWS_REGION", region)
+        self.logger.info("Configured AWS credentials from DPG_* environment variables")
+        return None
 
     @staticmethod
     def _to_bool(series: pd.Series) -> pd.Series:
@@ -207,14 +210,12 @@ class ADConverter(BaseConverter):
         root = self._normalize_s3_root(self.config.input_path)
         articles_path = f"{root}/article_metadata.csv"
         self.logger.info(f"Loading AD article metadata from {articles_path}")
-        boto3_session = self._build_boto3_session()
+        self._build_boto3_session()
 
         read_kwargs = {
             "path": articles_path,
             "use_threads": True,
         }
-        if boto3_session is not None:
-            read_kwargs["boto3_session"] = boto3_session
 
         df = wr.s3.read_csv(**read_kwargs)
         self.logger.info(f"Loaded {len(df)} raw articles")
@@ -269,7 +270,7 @@ class ADConverter(BaseConverter):
         root = self._normalize_s3_root(self.config.input_path)
         impressions_root = f"{root}/impressions/"
         self.logger.info(f"Loading AD impressions from {impressions_root}")
-        boto3_session = self._build_boto3_session()
+        self._build_boto3_session()
 
         usecols = [
             "ARTICLE_IDENTIFIER",
@@ -303,8 +304,6 @@ class ADConverter(BaseConverter):
                 "TIME_ON_PAGE": "float64",
             },
         }
-        if boto3_session is not None:
-            read_kwargs["boto3_session"] = boto3_session
 
         df = wr.s3.read_csv(**read_kwargs)
 
