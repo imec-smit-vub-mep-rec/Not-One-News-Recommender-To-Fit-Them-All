@@ -13,6 +13,8 @@ from __future__ import annotations
 from typing import Any, Optional
 import ast
 import json
+import os
+from urllib.parse import urlparse
 
 import numpy as np
 import pandas as pd
@@ -31,6 +33,75 @@ class ADConverter(BaseConverter):
     def _normalize_s3_root(path: str) -> str:
         """Ensure S3 root path has no trailing slash."""
         return str(path).rstrip("/")
+
+    @staticmethod
+    def _extract_bucket_from_s3_uri(s3_uri: str) -> Optional[str]:
+        """Extract bucket name from an s3:// URI."""
+        if not s3_uri:
+            return None
+        parsed = urlparse(s3_uri)
+        if parsed.scheme != "s3":
+            return None
+        return parsed.netloc or None
+
+    def _build_boto3_session(self):
+        """
+        Build boto3 session from custom DPG env vars.
+
+        Returns:
+            boto3.Session | None:
+                - Session when DPG credentials are provided
+                - None to let awswrangler use default AWS credential chain
+        """
+        access_key = os.getenv("DPG_ACCESS_KEY_ID")
+        secret_key = os.getenv("DPG_SECRET_ACCESS_KEY")
+        session_token = os.getenv("DPG_SESSION_TOKEN")
+
+        # If custom vars are not set, use default credential chain.
+        if not access_key or not secret_key:
+            self.logger.info(
+                "DPG_ACCESS_KEY_ID/DPG_SECRET_ACCESS_KEY not set; using default AWS credential chain"
+            )
+            return None
+
+        try:
+            import boto3
+        except ImportError as exc:
+            raise ImportError("boto3 is required when using DPG_* credentials.") from exc
+
+        # Try to auto-derive region from bucket location.
+        region = None
+        bucket = self._extract_bucket_from_s3_uri(self.config.input_path)
+        base_session = boto3.Session(
+            aws_access_key_id=access_key,
+            aws_secret_access_key=secret_key,
+            aws_session_token=session_token,
+        )
+
+        if bucket:
+            try:
+                s3_client = base_session.client("s3", region_name="us-east-1")
+                location = s3_client.get_bucket_location(Bucket=bucket).get("LocationConstraint")
+                region = "us-east-1" if location in (None, "") else location
+                self.logger.info(f"Derived AWS region from bucket '{bucket}': {region}")
+            except Exception as exc:
+                self.logger.warning(f"Could not derive region from bucket '{bucket}': {exc}")
+
+        if not region:
+            region = (
+                os.getenv("DPG_REGION")
+                or os.getenv("AWS_DEFAULT_REGION")
+                or os.getenv("AWS_REGION")
+                or "us-east-1"
+            )
+            self.logger.info(f"Using fallback AWS region: {region}")
+
+        return boto3.Session(
+            aws_access_key_id=access_key,
+            aws_secret_access_key=secret_key,
+            aws_session_token=session_token,
+            region_name=region,
+        )
 
     @staticmethod
     def _to_bool(series: pd.Series) -> pd.Series:
@@ -92,8 +163,16 @@ class ADConverter(BaseConverter):
         root = self._normalize_s3_root(self.config.input_path)
         articles_path = f"{root}/article_metadata.csv"
         self.logger.info(f"Loading AD article metadata from {articles_path}")
+        boto3_session = self._build_boto3_session()
 
-        df = wr.s3.read_csv(path=articles_path, use_threads=True)
+        read_kwargs = {
+            "path": articles_path,
+            "use_threads": True,
+        }
+        if boto3_session is not None:
+            read_kwargs["boto3_session"] = boto3_session
+
+        df = wr.s3.read_csv(**read_kwargs)
         self.logger.info(f"Loaded {len(df)} raw articles")
 
         # Standard mappings
@@ -146,6 +225,7 @@ class ADConverter(BaseConverter):
         root = self._normalize_s3_root(self.config.input_path)
         impressions_root = f"{root}/impressions/"
         self.logger.info(f"Loading AD impressions from {impressions_root}")
+        boto3_session = self._build_boto3_session()
 
         usecols = [
             "ARTICLE_IDENTIFIER",
@@ -163,13 +243,13 @@ class ADConverter(BaseConverter):
         def partition_filter(partitions: dict[str, str]) -> bool:
             return partitions.get("event_type") in event_types_set
 
-        df = wr.s3.read_csv(
-            path=impressions_root,
-            dataset=True,
-            use_threads=True,
-            usecols=usecols,
-            partition_filter=partition_filter,
-            dtype={
+        read_kwargs = {
+            "path": impressions_root,
+            "dataset": True,
+            "use_threads": True,
+            "usecols": usecols,
+            "partition_filter": partition_filter,
+            "dtype": {
                 "ARTICLE_IDENTIFIER": "string",
                 "IMPRESSION_ID": "string",
                 "START_TIME": "string",
@@ -178,7 +258,11 @@ class ADConverter(BaseConverter):
                 "MAPPED_USER_IDENTIFIER": "string",
                 "TIME_ON_PAGE": "float64",
             },
-        )
+        }
+        if boto3_session is not None:
+            read_kwargs["boto3_session"] = boto3_session
+
+        df = wr.s3.read_csv(**read_kwargs)
 
         if "event_type" not in df.columns:
             raise ValueError(
