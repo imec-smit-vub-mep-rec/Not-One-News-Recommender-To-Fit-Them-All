@@ -659,7 +659,7 @@ def run_evaluation(
         k_values=config.evaluation.k_values,
         min_items_per_user=config.clustering.min_impressions_per_user,  # Filter only at evaluation
         output_dir=results_dir,
-        n_jobs=-1,  # Parallel cluster evaluation
+        n_jobs=1,  # Sequential cluster evaluation (parallel causes OOM on large datasets)
         embeddings_df=embeddings_df,
         embedding_column=embedding_column,
     )
