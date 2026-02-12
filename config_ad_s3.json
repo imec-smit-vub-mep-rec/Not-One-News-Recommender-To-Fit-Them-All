@@ -5,7 +5,7 @@
       "format": "spark_csv",
       "event_types": ["home_page_view", "article_page_view"],
       "start_time_min": "2026-01-05T19:19:58.665Z",
-      "start_time_max": "2026-01-05T22:19:58.665Z"
+      "start_time_max": "2026-01-12T19:19:58.665Z"
     },
     "clustering": {
       "k_selection_method": "elbow",
