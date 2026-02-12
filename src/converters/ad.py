@@ -14,6 +14,7 @@ from typing import Any, Optional
 import ast
 import json
 import os
+from pathlib import Path
 from urllib.parse import urlparse
 
 import numpy as np
@@ -28,6 +29,43 @@ class ADConverter(BaseConverter):
 
     def __init__(self, config: DatasetConfig):
         super().__init__(config)
+
+    @staticmethod
+    def _load_dpg_env_from_dotenv() -> None:
+        """
+        Load DPG_* credentials from a local .env file if not exported.
+
+        This is a lightweight fallback to avoid requiring python-dotenv.
+        Existing process environment variables are never overwritten.
+        """
+        dotenv_path = Path(".env")
+        if not dotenv_path.exists():
+            return
+
+        try:
+            for raw_line in dotenv_path.read_text(encoding="utf-8").splitlines():
+                line = raw_line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                key = key.strip()
+                if key not in {
+                    "DPG_ACCESS_KEY_ID",
+                    "DPG_SECRET_ACCESS_KEY",
+                    "DPG_SESSION_TOKEN",
+                    "DPG_REGION",
+                }:
+                    continue
+                value = value.strip()
+                if (
+                    (value.startswith('"') and value.endswith('"'))
+                    or (value.startswith("'") and value.endswith("'"))
+                ):
+                    value = value[1:-1]
+                os.environ.setdefault(key, value)
+        except Exception:
+            # Non-fatal: continue with default environment chain.
+            return
 
     @staticmethod
     def _normalize_s3_root(path: str) -> str:
@@ -56,6 +94,12 @@ class ADConverter(BaseConverter):
         access_key = os.getenv("DPG_ACCESS_KEY_ID")
         secret_key = os.getenv("DPG_SECRET_ACCESS_KEY")
         session_token = os.getenv("DPG_SESSION_TOKEN")
+
+        if not access_key or not secret_key:
+            self._load_dpg_env_from_dotenv()
+            access_key = os.getenv("DPG_ACCESS_KEY_ID")
+            secret_key = os.getenv("DPG_SECRET_ACCESS_KEY")
+            session_token = os.getenv("DPG_SESSION_TOKEN")
 
         # If custom vars are not set, use default credential chain.
         if not access_key or not secret_key:
