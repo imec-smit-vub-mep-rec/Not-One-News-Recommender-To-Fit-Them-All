@@ -232,6 +232,13 @@ def load_or_create_config(args) -> PipelineConfig:
     
     # Apply config file overrides (for --dataset + --config case)
     if config_overrides:
+        if 'dataset' in config_overrides:
+            for key, value in config_overrides['dataset'].items():
+                # Accept legacy alias in config files.
+                target_key = "input_path" if key == "input_dir" else key
+                if hasattr(config.dataset, target_key):
+                    setattr(config.dataset, target_key, value)
+                    logger.info(f"Config override: dataset.{target_key} = {value}")
         if 'clustering' in config_overrides:
             for key, value in config_overrides['clustering'].items():
                 if hasattr(config.clustering, key):
