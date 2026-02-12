@@ -455,11 +455,14 @@ class KMeansClusterer:
             return {}
         return self.metrics_.copy()
     
-    def evaluate(self, X: np.ndarray) -> Dict[str, float]:
+    def evaluate(self, X: np.ndarray, silhouette_sample_size: int = 10000) -> Dict[str, float]:
         """Evaluate clustering quality.
         
         Args:
             X: Feature matrix
+            silhouette_sample_size: Subsample size for silhouette_score.
+                Full pairwise silhouette is O(n²) and infeasible for large datasets.
+                Set to 0 or None to use all samples (WARNING: very slow for n > 50k).
             
         Returns:
             Dictionary of evaluation metrics
@@ -473,7 +476,13 @@ class KMeansClusterer:
         }
         
         if self.n_clusters > 1:
-            metrics['silhouette_score'] = silhouette_score(X, self.labels_)
+            # Silhouette score is O(n²) — subsample for large datasets
+            sil_sample = silhouette_sample_size if (silhouette_sample_size and len(X) > silhouette_sample_size) else None
+            if sil_sample:
+                logger.info(f"Computing silhouette score on subsample of {sil_sample:,} (full dataset: {len(X):,})")
+            metrics['silhouette_score'] = silhouette_score(
+                X, self.labels_, sample_size=sil_sample, random_state=self.random_state,
+            )
             metrics['calinski_harabasz_score'] = calinski_harabasz_score(X, self.labels_)
             metrics['davies_bouldin_score'] = davies_bouldin_score(X, self.labels_)
         
