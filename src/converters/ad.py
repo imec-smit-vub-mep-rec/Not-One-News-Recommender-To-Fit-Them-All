@@ -200,6 +200,11 @@ class ADConverter(BaseConverter):
                 return token
         return ""
 
+    @staticmethod
+    def _normalize_colname(name: Any) -> str:
+        """Normalize source column names for robust matching."""
+        return str(name).strip().upper()
+
     def convert_articles(self) -> pd.DataFrame:
         """Convert AD article metadata to standard format."""
         try:
@@ -272,7 +277,7 @@ class ADConverter(BaseConverter):
         self.logger.info(f"Loading AD impressions from {impressions_root}")
         self._build_boto3_session()
 
-        usecols = [
+        expected_columns = [
             "ARTICLE_IDENTIFIER",
             "IMPRESSION_ID",
             "START_TIME",
@@ -292,20 +297,39 @@ class ADConverter(BaseConverter):
             "path": impressions_root,
             "dataset": True,
             "use_threads": True,
-            "usecols": usecols,
+            # Use a callable so case/whitespace differences do not fail reads.
+            "usecols": lambda c: self._normalize_colname(c) in set(expected_columns),
             "partition_filter": partition_filter,
-            "dtype": {
-                "ARTICLE_IDENTIFIER": "string",
-                "IMPRESSION_ID": "string",
-                "START_TIME": "string",
-                "SESSION_ID": "string",
-                "IS_LOGGED_IN": "string",
-                "MAPPED_USER_IDENTIFIER": "string",
-                "TIME_ON_PAGE": "float64",
-            },
         }
 
         df = wr.s3.read_csv(**read_kwargs)
+        self.logger.info(f"AD impressions raw columns: {list(df.columns)}")
+
+        column_map = {self._normalize_colname(col): col for col in df.columns}
+        self.logger.info(f"AD impressions normalized columns: {list(column_map.keys())}")
+        required = [
+            "MAPPED_USER_IDENTIFIER",
+            "SESSION_ID",
+            "IMPRESSION_ID",
+            "START_TIME",
+            "IS_LOGGED_IN",
+            "TIME_ON_PAGE",
+            "ARTICLE_IDENTIFIER",
+        ]
+        missing = [name for name in required if name not in column_map]
+        if missing:
+            self.logger.error(
+                "Missing required impression columns after normalization. "
+                f"Missing={missing}, raw_columns={list(df.columns)}, "
+                f"normalized_columns={list(column_map.keys())}"
+            )
+            raise ValueError(
+                "Missing required impression columns after normalization: "
+                f"{missing}. Available columns: {list(df.columns)}"
+            )
+
+        if "EVENT_TYPE" in column_map and "event_type" not in df.columns:
+            df["event_type"] = df[column_map["EVENT_TYPE"]]
 
         if "event_type" not in df.columns:
             raise ValueError(
@@ -314,7 +338,15 @@ class ADConverter(BaseConverter):
             )
 
         # Optional timestamp filters for smoke tests.
-        timestamps = pd.to_datetime(df["START_TIME"], errors="coerce", utc=True)
+        start_time_col = column_map["START_TIME"]
+        user_col = column_map["MAPPED_USER_IDENTIFIER"]
+        session_col = column_map["SESSION_ID"]
+        impression_col = column_map["IMPRESSION_ID"]
+        is_logged_in_col = column_map["IS_LOGGED_IN"]
+        time_on_page_col = column_map["TIME_ON_PAGE"]
+        article_col = column_map["ARTICLE_IDENTIFIER"]
+
+        timestamps = pd.to_datetime(df[start_time_col], errors="coerce", utc=True)
         if self.config.start_time_min:
             min_ts = pd.Timestamp(self.config.start_time_min, tz="UTC")
             df = df.loc[timestamps >= min_ts].copy()
@@ -327,11 +359,11 @@ class ADConverter(BaseConverter):
         self.logger.info(f"Loaded {len(df)} raw impressions")
 
         out = pd.DataFrame()
-        out["user_id"] = df["MAPPED_USER_IDENTIFIER"].astype("string")
-        out["session_id"] = df["SESSION_ID"].astype("string")
-        out["impression_id"] = df["IMPRESSION_ID"].astype("string")
-        out["read_time"] = pd.to_numeric(df["TIME_ON_PAGE"], errors="coerce").fillna(0.0)
-        out["is_subscriber"] = self._to_bool(df["IS_LOGGED_IN"]).astype(bool)
+        out["user_id"] = df[user_col].astype("string")
+        out["session_id"] = df[session_col].astype("string")
+        out["impression_id"] = df[impression_col].astype("string")
+        out["read_time"] = pd.to_numeric(df[time_on_page_col], errors="coerce").fillna(0.0)
+        out["is_subscriber"] = self._to_bool(df[is_logged_in_col]).astype(bool)
 
         # Convert RFC3339 timestamps to Unix milliseconds.
         ms = (timestamps.view("int64") // 10**6).astype("Int64")
@@ -339,7 +371,7 @@ class ADConverter(BaseConverter):
         out["impression_time"] = ms
 
         # Homepage rows must have null article_id for feature_engineering homepage detection.
-        out["article_id"] = df["ARTICLE_IDENTIFIER"].astype("string")
+        out["article_id"] = df[article_col].astype("string")
         homepage_mask = df["event_type"].astype(str).eq("home_page_view")
         out.loc[homepage_mask, "article_id"] = pd.NA
 
