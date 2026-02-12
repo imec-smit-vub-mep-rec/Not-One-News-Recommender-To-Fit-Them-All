@@ -8,6 +8,7 @@ from typing import Dict, List, Optional, Tuple, Any
 import pandas as pd
 import numpy as np
 from sklearn.preprocessing import StandardScaler
+from sklearn.impute import SimpleImputer
 
 from ..utils.logging import get_logger
 
@@ -34,16 +35,20 @@ def create_category_features(
     """
     logger.info("Creating category features...")
     
-    # Fill missing categories
-    df = df.copy()
-    df[category_col] = df[category_col].fillna('unknown')
+    # Fill missing categories without copying the full frame.
+    categories_series = df[category_col].fillna('unknown')
     
     # Get all unique categories
-    categories = df[category_col].unique()
+    categories = categories_series.unique()
     logger.info(f"Found {len(categories)} unique categories")
     
     # Count impressions per user per category
-    category_counts = df.groupby([user_col, category_col]).size().unstack(fill_value=0)
+    category_counts = (
+        df.assign(_category=categories_series)
+        .groupby([user_col, '_category'])
+        .size()
+        .unstack(fill_value=0)
+    )
     
     # Normalize to proportions
     category_proportions = category_counts.div(category_counts.sum(axis=1), axis=0)
@@ -78,31 +83,29 @@ def create_time_features(
     """
     logger.info("Creating time features...")
     
-    df = df.copy()
-    
     # Convert timestamp to datetime
     if df[time_col].dtype in ['int64', 'float64']:
         # Assume milliseconds if large values
         divisor = 1000 if df[time_col].max() > 10**12 else 1
-        df['_datetime'] = pd.to_datetime(df[time_col] // divisor, unit='s')
+        dt = pd.to_datetime(df[time_col] // divisor, unit='s')
     else:
-        df['_datetime'] = pd.to_datetime(df[time_col])
+        dt = pd.to_datetime(df[time_col])
     
     # Extract hour
-    df['_hour'] = df['_datetime'].dt.hour
+    hour = dt.dt.hour
     
     # Create time period columns
-    df['is_morning'] = (df['_hour'] >= 6) & (df['_hour'] < 12)
-    df['is_afternoon'] = (df['_hour'] >= 12) & (df['_hour'] < 18)
-    df['is_evening'] = (df['_hour'] >= 18) & (df['_hour'] < 24)
-    df['is_night'] = (df['_hour'] >= 0) & (df['_hour'] < 6)
-    
-    # Day of week
-    df['_dow'] = df['_datetime'].dt.dayofweek
-    df['is_weekend'] = df['_dow'] >= 5
+    time_df = pd.DataFrame({
+        user_col: df[user_col].values,
+        'is_morning': (hour >= 6) & (hour < 12),
+        'is_afternoon': (hour >= 12) & (hour < 18),
+        'is_evening': (hour >= 18) & (hour < 24),
+        'is_night': (hour >= 0) & (hour < 6),
+        'is_weekend': dt.dt.dayofweek >= 5,
+    })
     
     # Aggregate per user
-    time_features = df.groupby(user_col).agg({
+    time_features = time_df.groupby(user_col).agg({
         'is_morning': 'mean',
         'is_afternoon': 'mean',
         'is_evening': 'mean',
@@ -201,8 +204,10 @@ def create_homepage_features(
     """
     logger.info("Creating homepage features...")
     
+    # Support both normalized null homepage IDs and legacy string values.
+    article_ids = df[article_col]
     # Vectorized implementation for performance (~100x faster than row-by-row)
-    is_homepage = df[article_col].isna()
+    is_homepage = article_ids.isna() | article_ids.eq('homepage')
     
     # Total impressions per user
     total_counts = df.groupby(user_col).size()
@@ -300,25 +305,32 @@ def create_diversity_features(
     """
     logger.info("Creating diversity features...")
     
-    df = df.copy()
-    df[category_col] = df[category_col].fillna('unknown')
+    if legacy_mode:
+        # Legacy mode: count only valid categories (exclude NaN/empty), matching legacy pipeline.
+        all_users = df[user_col].drop_duplicates()
+        valid_df = df[(df[category_col].notna()) & (df[category_col] != '')]
+        num_categories = valid_df.groupby(user_col)[category_col].nunique().reindex(all_users, fill_value=0)
+        result = pd.DataFrame({
+            user_col: all_users.values,
+            'num_categories': num_categories.values.astype(float),
+        })
+        logger.info(f"Created 1 diversity feature (legacy mode) for {len(result)} users")
+        return result
+
+    categories_series = df[category_col].fillna('unknown')
     
     # Vectorized implementation for performance (~5x faster than row-by-row)
     
     # Count impressions per user per category
-    user_cat_counts = df.groupby([user_col, category_col]).size().unstack(fill_value=0)
+    user_cat_counts = (
+        df.assign(_category=categories_series)
+        .groupby([user_col, '_category'])
+        .size()
+        .unstack(fill_value=0)
+    )
     
     # Number of unique categories per user
     num_categories = (user_cat_counts > 0).sum(axis=1)
-    
-    if legacy_mode:
-        # Legacy mode: only return num_categories
-        result = pd.DataFrame({
-            user_col: user_cat_counts.index,
-            'num_categories': num_categories.values,
-        })
-        logger.info(f"Created 1 diversity feature (legacy mode) for {len(result)} users")
-        return result
     
     # Full mode: include entropy and gini
     # Convert to proportions for entropy calculation
@@ -328,27 +340,60 @@ def create_diversity_features(
     log_props = np.where(user_cat_props > 0, np.log(user_cat_props + 1e-10), 0)
     category_entropy = -(user_cat_props * log_props).sum(axis=1)
     
-    # Gini coefficient per user
-    def compute_gini_row(counts):
-        """Compute Gini coefficient for a single user's category counts."""
-        counts = counts[counts > 0].values
-        if len(counts) == 0:
-            return 0
-        sorted_counts = np.sort(counts)
-        n = len(sorted_counts)
-        index = np.arange(1, n + 1)
-        return (np.sum((2 * index - n - 1) * sorted_counts)) / (n * np.sum(sorted_counts) + 1e-10)
-    
-    category_gini = user_cat_counts.apply(compute_gini_row, axis=1)
+    # Gini coefficient per user (vectorized over all users).
+    counts_arr = user_cat_counts.to_numpy(dtype=np.float64)
+    n_categories = counts_arr.shape[1]
+    sorted_counts = np.sort(counts_arr, axis=1)
+    row_sums = sorted_counts.sum(axis=1)
+    idx = np.arange(1, n_categories + 1, dtype=np.float64)
+    numer = ((2.0 * idx - n_categories - 1.0) * sorted_counts).sum(axis=1)
+    denom = n_categories * row_sums + 1e-10
+    category_gini = np.where(row_sums > 0, numer / denom, 0.0)
     
     result = pd.DataFrame({
         user_col: user_cat_counts.index,
         'category_entropy': category_entropy.values,
         'num_categories': num_categories.values,
-        'category_gini': category_gini.values,
+        'category_gini': category_gini,
     })
     
     logger.info(f"Created 3 diversity features for {len(result)} users")
+    
+    return result
+
+
+def create_subscriber_features(
+    df: pd.DataFrame,
+    user_col: str = 'user_id',
+    subscriber_col: str = 'is_subscriber',
+) -> pd.DataFrame:
+    """Create subscriber status feature per user.
+    
+    Maps the per-impression subscriber flag to a single boolean per user.
+    In the legacy pipeline this was a clustering feature.
+    
+    Args:
+        df: Impressions DataFrame
+        user_col: Name of user ID column
+        subscriber_col: Name of subscriber column
+        
+    Returns:
+        DataFrame with user_id and is_subscriber column (1/0)
+    """
+    logger.info("Creating subscriber features...")
+    
+    if subscriber_col not in df.columns:
+        logger.info(f"Column '{subscriber_col}' not found — skipping subscriber feature")
+        return None
+    
+    # A user is a subscriber if *any* of their impressions have is_subscriber=True
+    subscriber_status = df.groupby(user_col)[subscriber_col].any().astype(int)
+    
+    result = subscriber_status.reset_index()
+    result.columns = [user_col, 'is_subscriber']
+    
+    n_subscribers = result['is_subscriber'].sum()
+    logger.info(f"Created subscriber feature for {len(result)} users ({n_subscribers} subscribers, {len(result) - n_subscribers} non-subscribers)")
     
     return result
 
@@ -379,14 +424,12 @@ def create_session_behavior_features(
     Returns:
         DataFrame with user_id and session behavior columns:
         - avg_reading_time: overall average reading time per user
-        - avg_session_length: average articles per session
+        - avg_session_length: average impressions per session (includes homepage views in legacy mode)
         - avg_categories_per_session: unique categories per session, averaged
         - avg_category_switches: category switches within sessions, averaged
         - avg_session_duration: session duration in seconds, averaged
     """
     logger.info("Creating session behavior features...")
-    
-    df = df.copy()
     
     # Get unique users
     users = df[user_col].unique()
@@ -404,11 +447,9 @@ def create_session_behavior_features(
     
     # Session-based features (require session_col)
     if session_col in df.columns:
-        # 2. avg_session_length: average articles per session
-        # Count article impressions per session (exclude homepage views)
-        article_mask = df[article_col].notna() if article_col in df.columns else pd.Series(True, index=df.index)
-        articles_per_session = df[article_mask].groupby([user_col, session_col]).size()
-        avg_session_length = articles_per_session.groupby(user_col).mean()
+        # 2. avg_session_length: average impressions per session (legacy behavior includes homepage views)
+        impressions_per_session = df.groupby([user_col, session_col]).size()
+        avg_session_length = impressions_per_session.groupby(user_col).mean()
         result['avg_session_length'] = avg_session_length.reindex(result.index, fill_value=0)
         
         # 3. avg_categories_per_session: unique categories per session, averaged
@@ -425,23 +466,25 @@ def create_session_behavior_features(
                 result['avg_categories_per_session'] = 0
             
             # 4. avg_category_switches: category switches within sessions, averaged
-            # Sort by time within each session, count transitions where category changes
+            # Vectorized implementation matching legacy behavior:
+            # - consider only valid categories
+            # - only sessions with >1 valid-category impressions contribute to the average
             sorted_df = valid_df.sort_values([user_col, session_col, time_col])
-            
-            # Compute switches per session
-            switches_list = []
-            for (uid, sid), group in sorted_df.groupby([user_col, session_col]):
-                categories = group[category_col].values
-                if len(categories) > 1:
-                    # Count transitions where category changes
-                    switches = sum(1 for i in range(1, len(categories)) if categories[i] != categories[i-1])
-                else:
-                    switches = 0
-                switches_list.append({user_col: uid, session_col: sid, 'switches': switches})
-            
-            if switches_list:
-                switches_df = pd.DataFrame(switches_list)
-                avg_switches = switches_df.groupby(user_col)['switches'].mean()
+
+            if len(sorted_df) > 0:
+                session_keys = [user_col, session_col]
+                shifted = sorted_df.groupby(session_keys)[category_col].shift(1)
+                switches = ((sorted_df[category_col] != shifted) & shifted.notna()).astype(int)
+                switches_per_session = switches.groupby(
+                    [sorted_df[user_col], sorted_df[session_col]]
+                ).sum()
+                session_sizes = sorted_df.groupby(session_keys).size()
+                valid_sessions = session_sizes[session_sizes > 1].index
+                switches_per_session = switches_per_session.loc[
+                    switches_per_session.index.isin(valid_sessions)
+                ]
+
+                avg_switches = switches_per_session.groupby(level=0).mean()
                 result['avg_category_switches'] = avg_switches.reindex(result.index, fill_value=0)
             else:
                 result['avg_category_switches'] = 0
@@ -462,12 +505,17 @@ def create_session_behavior_features(
                 # Convert datetime to seconds since epoch
                 time_seconds = pd.to_datetime(time_data).astype('int64') / 1e9
             
-            df['_time_seconds'] = time_seconds
-            
             # Calculate session duration: max - min time per session
-            session_duration = df.groupby([user_col, session_col])['_time_seconds'].agg(
-                lambda x: x.max() - x.min()
+            session_time_bounds = (
+                pd.DataFrame({
+                    user_col: df[user_col].values,
+                    session_col: df[session_col].values,
+                    '_time_seconds': time_seconds.values if hasattr(time_seconds, "values") else time_seconds,
+                })
+                .groupby([user_col, session_col])['_time_seconds']
+                .agg(['max', 'min'])
             )
+            session_duration = session_time_bounds['max'] - session_time_bounds['min']
             avg_session_duration = session_duration.groupby(user_col).mean()
             result['avg_session_duration'] = avg_session_duration.reindex(result.index, fill_value=0)
         else:
@@ -538,6 +586,7 @@ def create_user_features(
     include_diversity: bool = True,
     include_homepage: bool = True,
     include_session_behavior: bool = False,
+    include_subscriber: bool = False,
     legacy_mode: bool = False,
     scale: bool = True,
     user_col: str = 'user_id',
@@ -559,10 +608,12 @@ def create_user_features(
         include_session_behavior: Whether to include session behavior features
                                   (avg_reading_time, avg_session_length, avg_categories_per_session,
                                   avg_category_switches, avg_session_duration)
+        include_subscriber: Whether to include subscriber status feature
         legacy_mode: If True, automatically configure for legacy feature set:
                      - Disable category proportions (include_categories=False)
                      - Disable time features (include_time=False)
                      - Enable session behavior (include_session_behavior=True)
+                     - Keep subscriber as post-hoc reporting only (include_subscriber=False)
                      - Use legacy diversity mode (only num_categories)
         scale: Whether to scale features
         user_col: Name of user ID column
@@ -576,6 +627,7 @@ def create_user_features(
         include_categories = False
         include_time = False
         include_session_behavior = True
+        include_subscriber = False  # Subscriber is post-hoc reporting only, not a clustering feature
         # legacy_mode will also be passed to diversity features
     
     logger.info("Creating user features...")
@@ -624,13 +676,50 @@ def create_user_features(
         features = features.merge(session_features, on=user_col, how='left')
         metadata['feature_groups']['session_behavior'] = [c for c in session_features.columns if c != user_col]
     
+    # Subscriber feature (legacy clustering signal)
+    if include_subscriber:
+        subscriber_features = create_subscriber_features(df, user_col)
+        if subscriber_features is not None:
+            features = features.merge(subscriber_features, on=user_col, how='left')
+            metadata['feature_groups']['subscriber'] = [c for c in subscriber_features.columns if c != user_col]
+    
     # Diversity features
     if include_diversity and 'category_str' in df.columns:
         diversity_features = create_diversity_features(df, user_col, legacy_mode=legacy_mode)
         features = features.merge(diversity_features, on=user_col, how='left')
         metadata['feature_groups']['diversity'] = [c for c in diversity_features.columns if c != user_col]
     
-    # Fill NaN values
+    if legacy_mode:
+        # Keep exact legacy clustering feature set.
+        legacy_feature_cols = [
+            'num_sessions',
+            'total_impressions',
+            'homepage_impressions',
+            'article_impressions',
+            'num_categories',
+            'unique_articles',
+            'avg_reading_time',
+            'proportion_article_time',
+            'avg_session_length',
+            'avg_categories_per_session',
+            'avg_category_switches',
+            'avg_session_duration',
+        ]
+        existing_legacy_cols = [c for c in legacy_feature_cols if c in features.columns]
+        features = features[[user_col] + existing_legacy_cols].copy()
+
+    # Legacy-style targeted zero fill before mean imputation.
+    for col in ('avg_categories_per_session', 'avg_category_switches', 'proportion_article_time'):
+        if col in features.columns:
+            features[col] = features[col].fillna(0)
+
+    # Mean imputation fallback for any remaining NaNs.
+    feature_cols = [c for c in features.columns if c != user_col]
+    if feature_cols and features[feature_cols].isna().any().any():
+        imputer = SimpleImputer(strategy='mean')
+        features[feature_cols] = imputer.fit_transform(features[feature_cols])
+
+    # Final fallback.
     features = features.fillna(0)
     
     # Scale features
@@ -663,6 +752,7 @@ class UserFeatureExtractor:
         include_diversity: bool = True,
         include_homepage: bool = True,
         include_session_behavior: bool = False,
+        include_subscriber: bool = False,
         legacy_mode: bool = False,
         scale: bool = True,
         user_col: str = 'user_id',
@@ -679,10 +769,12 @@ class UserFeatureExtractor:
                               vs article readers, matching legacy clustering behavior.
             include_session_behavior: Whether to include session behavior features
                                       (avg_reading_time, avg_session_length, etc.)
+            include_subscriber: Whether to include subscriber status feature
             legacy_mode: If True, automatically configure for legacy feature set:
                          - Disable category proportions
                          - Disable time features
                          - Enable session behavior
+                         - Keep subscriber as post-hoc reporting only
                          - Use legacy diversity mode (only num_categories)
             scale: Whether to scale features
             user_col: Name of user ID column
@@ -693,6 +785,7 @@ class UserFeatureExtractor:
         self.include_diversity = include_diversity
         self.include_homepage = include_homepage
         self.include_session_behavior = include_session_behavior
+        self.include_subscriber = include_subscriber
         self.legacy_mode = legacy_mode
         self.scale = scale
         self.user_col = user_col
@@ -723,6 +816,7 @@ class UserFeatureExtractor:
             include_diversity=self.include_diversity,
             include_homepage=self.include_homepage,
             include_session_behavior=self.include_session_behavior,
+            include_subscriber=self.include_subscriber,
             legacy_mode=self.legacy_mode,
             scale=self.scale,
             user_col=self.user_col,

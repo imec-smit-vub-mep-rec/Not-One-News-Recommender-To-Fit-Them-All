@@ -433,6 +433,18 @@ The pipeline uses RecPack's **LastItemPrediction** scenario (matching legacy beh
 - All **earlier interactions** are used for training
 - This evaluates how well algorithms predict what a user will read next based on their history
 
+### Metrics (Per-K)
+
+For each configured value in `evaluation.k_values`, the pipeline reports:
+
+- `NDCGK_<k>`, `RecallK_<k>`, `PrecisionK_<k>`: ranking quality at cutoff `k`
+- `CoverageK_<k>`: catalog coverage at `k`, computed as unique recommended items divided by total available items
+- `GiniK_<k>`: inequality of item exposure at `k`, computed from recommendation frequency across items
+
+Interpretation:
+- Higher `CoverageK_<k>` means recommendations are spread over more of the catalog
+- Lower `GiniK_<k>` means item exposure is more evenly distributed (less concentration on a few items)
+
 ### Data Filtering (Legacy Parity)
 
 To match the legacy pipeline, the following filters are applied:
@@ -442,6 +454,18 @@ To match the legacy pipeline, the following filters are applied:
 3. **Empty Article Removal**: Impressions without valid article_id are removed for evaluation (but kept for clustering to capture homepage behavior)
 
 The session filter can be disabled by passing `max_impressions_per_session=None` to the `DataCleaner`.
+
+### Legacy vs Current Evaluation Design
+
+The pipeline keeps legacy-compatible inputs and reporting, but the RecPack evaluation design is intentionally modernized in a few places:
+
+- **Per-cluster training (current)**: models are trained and evaluated separately inside each cluster.
+- **Post-hoc cluster slicing (legacy)**: a single global model is trained, then results are analyzed by cluster.
+- **Hyperparameter search**: legacy used RecPack grid search for `ItemKNN` and `EASE`; current pipeline uses configured defaults.
+- **Scenario coverage**: current pipeline focuses on `LastItemPrediction`; legacy scripts also contained `WeakGeneralization` and `Timed` experiments.
+- **History cap**: legacy `LastItemPrediction` used `n_most_recent_in=30`; current pipeline uses all available user history unless you add a custom cap.
+
+These differences mainly affect comparability of absolute metric values with old experiments. Cluster profiles and feature semantics remain aligned with the legacy clustering behavior.
 
 ## Output
 

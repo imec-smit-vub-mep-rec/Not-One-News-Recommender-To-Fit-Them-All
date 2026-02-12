@@ -176,7 +176,9 @@ class AdressaConverter(BaseConverter):
         
         # Create impressions DataFrame (vectorized)
         article_id_col = chunk['id'].fillna('empty') if 'id' in chunk.columns else pd.Series('empty', index=chunk.index)
-        article_ids = np.where(chunk['is_homepage'], 'homepage', article_id_col)
+        # Normalize homepage rows to null article_id so downstream feature engineering
+        # can consistently detect homepage impressions across datasets.
+        article_ids = np.where(chunk['is_homepage'], None, article_id_col)
         
         active_time = chunk['activeTime'].fillna(0) if 'activeTime' in chunk.columns else pd.Series(0, index=chunk.index)
         

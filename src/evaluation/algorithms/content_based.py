@@ -320,32 +320,40 @@ class SentenceTransformerContentBased(Algorithm):
         
         # Build reverse mapping: internal_id -> original_article_id
         inv_mapping = {v: k for k, v in self.item_mapping.items()} if self.item_mapping else {}
-        
-        # Prepare embeddings DataFrame for lookup
-        emb_df = self._precalculated_embeddings.copy()
+
+        # Prepare embeddings DataFrame for vectorized lookup.
+        emb_df = self._precalculated_embeddings[['article_id', self._embedding_column]].copy()
         emb_df['article_id'] = emb_df['article_id'].astype(str)
-        emb_df = emb_df.set_index('article_id')
-        
-        item_ids = []
-        embeddings = []
-        
-        for internal_id in range(num_items):
-            # Get original article_id from internal_id
-            original_id = inv_mapping.get(internal_id)
-            if original_id is None:
-                continue
-            
-            # Look up embedding
-            if original_id in emb_df.index:
-                emb = emb_df.loc[original_id, self._embedding_column]
-                if emb is not None and len(emb) > 0:
-                    item_ids.append(internal_id)
-                    embeddings.append(np.array(emb, dtype=np.float32))
-        
+        emb_df = emb_df.drop_duplicates(subset=['article_id'], keep='first')
+
+        # Build lookup frame for all internal IDs at once.
+        lookup = pd.DataFrame({'internal_id': np.arange(num_items, dtype=np.int64)})
+        lookup['article_id'] = lookup['internal_id'].map(inv_mapping)
+        lookup = lookup.dropna(subset=['article_id'])
+        if lookup.empty:
+            self._log("Loaded 0 pre-calculated embeddings")
+            return [], None
+
+        lookup['article_id'] = lookup['article_id'].astype(str)
+        merged = lookup.merge(emb_df, on='article_id', how='left')
+
+        valid_mask = merged[self._embedding_column].map(
+            lambda emb: emb is not None and hasattr(emb, '__len__') and len(emb) > 0
+        )
+        merged = merged.loc[valid_mask]
+
+        if merged.empty:
+            self._log("Loaded 0 pre-calculated embeddings")
+            return [], None
+
+        item_ids = merged['internal_id'].astype(int).tolist()
+        embeddings = np.vstack(
+            merged[self._embedding_column].map(lambda emb: np.asarray(emb, dtype=np.float32)).values
+        )
+
         self._log(f"Loaded {len(item_ids)} pre-calculated embeddings")
-        
-        if embeddings:
-            return item_ids, np.array(embeddings)
+        if len(item_ids) > 0:
+            return item_ids, embeddings
         return [], None
     
     def _encode_content(self, num_items: int):

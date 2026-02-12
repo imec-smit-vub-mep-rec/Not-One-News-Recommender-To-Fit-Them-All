@@ -156,15 +156,28 @@ def articles_to_content(
     if full_content:
         df[body_col] = df[body_col].str[:500]
     
-    # Create content strings
-    content = df.apply(
-        lambda row: template.format(
-            category=row[category_col],
-            title=row[title_col],
-            body=row[body_col] if full_content else ''
-        ),
-        axis=1
-    )
+    # Create content strings with vectorized operations for large datasets.
+    if full_content:
+        content = (
+            'query: '
+            + df[category_col]
+            + ': '
+            + df[title_col]
+            + '. '
+            + df[body_col]
+        )
+    elif template == 'query: {category}: {title}':
+        content = 'query: ' + df[category_col] + ': ' + df[title_col]
+    else:
+        # Fallback for custom templates.
+        content = df.apply(
+            lambda row: template.format(
+                category=row[category_col],
+                title=row[title_col],
+                body=row[body_col] if full_content else ''
+            ),
+            axis=1
+        )
     
     result = pd.DataFrame({
         'article_id': df[article_col].astype(str),

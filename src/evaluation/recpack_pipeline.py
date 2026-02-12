@@ -8,6 +8,7 @@ from typing import Dict, List, Optional, Any, Tuple
 import pandas as pd
 import numpy as np
 from pathlib import Path
+from scipy.sparse import issparse
 
 from ..utils.logging import get_logger
 from ..utils.io import load_dataframe, save_dataframe, ensure_dir
@@ -36,6 +37,130 @@ def check_recpack_available():
         raise ImportError(
             "RecPack is not installed. Install with: pip install recpack"
         )
+
+
+def _compute_topk_item_exposure(predictions: Any, k: int) -> np.ndarray:
+    """Count how often each item appears in users' Top-K recommendations."""
+    if k <= 0:
+        return np.array([], dtype=np.float64)
+
+    if issparse(predictions):
+        pred_csr = predictions.tocsr()
+        n_items = pred_csr.shape[1]
+        exposure = np.zeros(n_items, dtype=np.float64)
+
+        for user_idx in range(pred_csr.shape[0]):
+            row = pred_csr.getrow(user_idx)
+            if row.nnz == 0:
+                continue
+
+            row_scores = row.data
+            row_items = row.indices
+            if row_scores.size > k:
+                top_idx = np.argpartition(row_scores, -k)[-k:]
+                top_items = row_items[top_idx]
+            else:
+                top_items = row_items
+
+            exposure[top_items] += 1.0
+
+        return exposure
+
+    pred_arr = np.asarray(predictions)
+    if pred_arr.ndim != 2:
+        return np.array([], dtype=np.float64)
+
+    n_users, n_items = pred_arr.shape
+    exposure = np.zeros(n_items, dtype=np.float64)
+    topk = min(k, n_items)
+
+    if topk <= 0:
+        return exposure
+
+    for user_idx in range(n_users):
+        row_scores = pred_arr[user_idx]
+        if not np.any(np.isfinite(row_scores)):
+            continue
+        top_items = np.argpartition(row_scores, -topk)[-topk:]
+        exposure[top_items] += 1.0
+
+    return exposure
+
+
+def _gini_from_exposure(exposure: np.ndarray) -> float:
+    """Compute Gini coefficient from item exposure counts."""
+    if exposure.size == 0:
+        return 0.0
+
+    exposure = np.clip(exposure.astype(np.float64), 0.0, None)
+    total = exposure.sum()
+    if total <= 0:
+        return 0.0
+
+    sorted_exposure = np.sort(exposure)
+    n = sorted_exposure.size
+    index = np.arange(1, n + 1, dtype=np.float64)
+    gini = (2.0 * np.sum(index * sorted_exposure)) / (n * total) - (n + 1.0) / n
+    return float(np.clip(gini, 0.0, 1.0))
+
+
+def _compute_diversity_at_k(predictions: Any, k_values: List[int]) -> Dict[str, float]:
+    """Compute per-K diversity metrics from prediction scores."""
+    diversity: Dict[str, float] = {}
+    n_items = predictions.shape[1] if hasattr(predictions, "shape") else 0
+
+    for k in k_values:
+        exposure = _compute_topk_item_exposure(predictions, k)
+        coverage = 0.0 if n_items == 0 else float(np.count_nonzero(exposure) / n_items)
+        gini = _gini_from_exposure(exposure)
+        diversity[f'CoverageK_{k}'] = coverage
+        diversity[f'GiniK_{k}'] = gini
+
+    return diversity
+
+
+def _fit_and_predict_algorithm(algo_instance: Any, train_data: Any, test_in_data: Any) -> Any:
+    """Fit and predict with RecPack algorithm APIs (public or protected)."""
+    if hasattr(algo_instance, 'fit'):
+        algo_instance.fit(train_data)
+    elif hasattr(algo_instance, '_fit'):
+        algo_instance._fit(train_data)
+    else:
+        raise AttributeError(f"{algo_instance.__class__.__name__} has no fit/_fit method")
+
+    if hasattr(algo_instance, 'predict'):
+        return algo_instance.predict(test_in_data)
+    if hasattr(algo_instance, '_predict'):
+        return algo_instance._predict(test_in_data)
+
+    raise AttributeError(f"{algo_instance.__class__.__name__} has no predict/_predict method")
+
+
+def _extract_pipeline_predictions(pipeline: Any) -> Dict[str, Any]:
+    """Best-effort extraction of algorithm predictions from a RecPack pipeline."""
+    candidates: List[Any] = []
+    for attr in ("get_predictions", "predictions", "_predictions"):
+        obj = getattr(pipeline, attr, None)
+        if callable(obj):
+            try:
+                candidates.append(obj())
+            except Exception:
+                continue
+        elif obj is not None:
+            candidates.append(obj)
+
+    for cand in candidates:
+        if isinstance(cand, dict):
+            normalized: Dict[str, Any] = {}
+            for key, value in cand.items():
+                if hasattr(key, "__name__"):
+                    normalized[key.__name__] = value
+                else:
+                    normalized[str(key)] = value
+            if normalized:
+                return normalized
+
+    return {}
 
 
 def create_interaction_matrix(
@@ -245,12 +370,13 @@ def run_evaluation(
             recpack_algorithms.append(algo_name)
     
     # Add metrics
-    from recpack.metrics import NDCGK, RecallK, PrecisionK
+    from recpack.metrics import NDCGK, RecallK, PrecisionK, CoverageK
     
     for k in k_values:
         builder.add_metric(NDCGK, K=k)
         builder.add_metric(RecallK, K=k)
         builder.add_metric(PrecisionK, K=k)
+        builder.add_metric(CoverageK, K=k)
     
     # Run pipeline for standard algorithms
     results_list = []
@@ -263,6 +389,55 @@ def run_evaluation(
         results = pipeline.get_metrics(short=True)
         results = results.reset_index()
         results = results.rename(columns={'index': 'algorithm'})
+
+        # Normalize metric names to the project convention.
+        rename_map = {}
+        for k in k_values:
+            if f'Coverage_{k}' in results.columns:
+                rename_map[f'Coverage_{k}'] = f'CoverageK_{k}'
+            if f'CoverageK({k})' in results.columns:
+                rename_map[f'CoverageK({k})'] = f'CoverageK_{k}'
+        if rename_map:
+            results = results.rename(columns=rename_map)
+
+        # Compute diversity from the same prediction outputs produced by pipeline.run().
+        pipeline_predictions = _extract_pipeline_predictions(pipeline)
+        gini_by_algorithm: Dict[str, Dict[str, float]] = {}
+        for algo_name in recpack_algorithms:
+            try:
+                predictions = pipeline_predictions.get(algo_name)
+                if predictions is None:
+                    logger.warning(
+                        f"Predictions for '{algo_name}' not exposed by RecPack pipeline; "
+                        "diversity metrics will remain NaN for this algorithm."
+                    )
+                    continue
+                diversity = _compute_diversity_at_k(predictions, k_values)
+                gini_by_algorithm[algo_name] = {
+                    key: value for key, value in diversity.items() if key.startswith('GiniK_')
+                }
+
+                # Fallback coverage from predictions in case RecPack naming differs/missing.
+                for key, value in diversity.items():
+                    if key.startswith('CoverageK_') and key not in results.columns:
+                        gini_by_algorithm[algo_name][key] = value
+            except Exception as e:
+                logger.warning(f"Failed to compute diversity for {algo_name}: {e}")
+
+        for k in k_values:
+            gini_col = f'GiniK_{k}'
+            if gini_col not in results.columns:
+                results[gini_col] = np.nan
+            coverage_col = f'CoverageK_{k}'
+            if coverage_col not in results.columns:
+                results[coverage_col] = np.nan
+
+        for idx, row in results.iterrows():
+            algo_name = row.get('algorithm')
+            algo_metrics = gini_by_algorithm.get(algo_name, {})
+            for metric_name, metric_value in algo_metrics.items():
+                results.at[idx, metric_name] = metric_value
+
         results_list.append(results)
     
     # Run CB-ST instances separately if configured
@@ -295,21 +470,26 @@ def run_evaluation(
                     predictions = cb_algo_instance._predict(test_in_data)
                     
                     # Calculate metrics manually
-                    from recpack.metrics import NDCGK, RecallK, PrecisionK
+                    from recpack.metrics import NDCGK, RecallK, PrecisionK, CoverageK
                     
                     cb_results = {'algorithm': cb_name}
+                    diversity = _compute_diversity_at_k(predictions, k_values)
                     for k in k_values:
                         ndcg = NDCGK(k)
                         recall = RecallK(k)
                         precision = PrecisionK(k)
+                        coverage = CoverageK(k)
                         
                         ndcg.calculate(test_out_data, predictions)
                         recall.calculate(test_out_data, predictions)
                         precision.calculate(test_out_data, predictions)
+                        coverage.calculate(test_out_data, predictions)
                         
                         cb_results[f'NDCGK_{k}'] = ndcg.value
                         cb_results[f'RecallK_{k}'] = recall.value
                         cb_results[f'PrecisionK_{k}'] = precision.value
+                        cb_results[f'CoverageK_{k}'] = coverage.value
+                        cb_results[f'GiniK_{k}'] = diversity[f'GiniK_{k}']
                     
                     results_list.append(pd.DataFrame([cb_results]))
                     logger.info(f"{cb_name} evaluation complete")
@@ -412,6 +592,32 @@ class RecPackPipeline:
             logger.info(f"Loaded content for {len(self.content_df)} items")
         
         return self
+
+    def load_data_from_dataframes(
+        self,
+        interactions_df: pd.DataFrame,
+        content_df: Optional[pd.DataFrame] = None,
+        user_col: str = 'user_id',
+        item_col: str = 'article_id',
+        time_col: str = 'impression_time',
+    ) -> 'RecPackPipeline':
+        """Load interaction and optional content data directly from DataFrames."""
+        logger.info(f"Loaded {len(interactions_df)} interactions (in-memory)")
+
+        self.interaction_matrix, self.preprocessing_info = create_interaction_matrix(
+            interactions_df,
+            user_col=user_col,
+            item_col=item_col,
+            time_col=time_col,
+            min_items_per_user=self.min_items_per_user,
+            min_users_per_item=self.min_users_per_item,
+        )
+
+        self.content_df = content_df
+        if self.content_df is not None:
+            logger.info(f"Loaded content for {len(self.content_df)} items (in-memory)")
+
+        return self
     
     def run(
         self,
@@ -501,9 +707,6 @@ def _evaluate_single_cluster(
     Returns:
         Tuple of (cluster_id, results DataFrame or None if skipped)
     """
-    import tempfile
-    import os
-    
     logger.info(f"Evaluating cluster {cluster_id} ({len(cluster_interactions)} interactions)...")
     
     # Skip if too few interactions
@@ -519,21 +722,10 @@ def _evaluate_single_cluster(
         embedding_column=embedding_column,
     )
     
-    # Create temporary files for the cluster data
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.csv', delete=False) as f:
-        cluster_interactions.to_csv(f.name, index=False)
-        interactions_path = f.name
-    
     try:
-        content_path = None
-        if content_df is not None:
-            with tempfile.NamedTemporaryFile(mode='w', suffix='.csv', delete=False) as f:
-                content_df.to_csv(f.name, index=False)
-                content_path = f.name
-        
-        pipeline.load_data(
-            interactions_path=interactions_path,
-            content_path=content_path,
+        pipeline.load_data_from_dataframes(
+            interactions_df=cluster_interactions,
+            content_df=content_df,
         )
         
         cluster_results = pipeline.run(algorithms=algorithms)
@@ -549,12 +741,6 @@ def _evaluate_single_cluster(
     except Exception as e:
         logger.error(f"Error evaluating cluster {cluster_id}: {e}")
         return cluster_id, None
-    
-    finally:
-        # Clean up temp files
-        os.unlink(interactions_path)
-        if content_path:
-            os.unlink(content_path)
 
 
 def run_cluster_evaluation(
@@ -609,10 +795,14 @@ def run_cluster_evaluation(
     
     # Prepare cluster data
     cluster_data = {}
+    users_df_local = users_df.copy()
+    users_df_local['user_id'] = users_df_local['user_id'].astype(str)
+    interactions_df_local = interactions_df.copy()
+    interactions_df_local['user_id'] = interactions_df_local['user_id'].astype(str)
     for cluster_id in cluster_ids:
-        cluster_users = users_df[users_df['cluster_id'] == cluster_id]['user_id'].astype(str)
-        cluster_interactions = interactions_df[
-            interactions_df['user_id'].astype(str).isin(cluster_users)
+        cluster_users = users_df_local[users_df_local['cluster_id'] == cluster_id]['user_id']
+        cluster_interactions = interactions_df_local[
+            interactions_df_local['user_id'].isin(cluster_users)
         ].copy()
         cluster_data[cluster_id] = cluster_interactions
         logger.info(f"Cluster {cluster_id}: {len(cluster_users)} users, {len(cluster_interactions)} interactions")

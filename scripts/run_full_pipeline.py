@@ -19,6 +19,7 @@ from pathlib import Path
 from datetime import datetime
 import ast
 import json
+import gc
 
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -405,6 +406,188 @@ def run_preprocessing(
     return cleaned_articles, cleaned_impressions, interactions_df
 
 
+def _compute_cluster_summary(
+    impressions_df: 'pd.DataFrame',
+    users_df: 'pd.DataFrame',
+) -> 'pd.DataFrame':
+    """Compute the legacy-style cluster summary from raw impressions.
+
+    Matches the legacy ``create_cluster_summary`` output with interpretable
+    average values per cluster.
+
+    Args:
+        impressions_df: Raw impressions DataFrame (with homepage views).
+        users_df: DataFrame with ``user_id`` and ``cluster_id`` columns.
+
+    Returns:
+        DataFrame indexed by cluster_id with one row per cluster.
+    """
+    import numpy as np
+    import pandas as pd
+
+    users_unique = users_df[['user_id', 'cluster_id']].drop_duplicates()
+    user_cluster = users_unique.set_index('user_id')['cluster_id']
+
+    cluster_by_impression = impressions_df['user_id'].map(user_cluster)
+    valid_mask = cluster_by_impression.notna()
+    if not valid_mask.any():
+        return pd.DataFrame()
+
+    needed_cols = [c for c in ['user_id', 'article_id', 'read_time', 'session_id', 'category_str', 'impression_time'] if c in impressions_df.columns]
+    df = impressions_df.loc[valid_mask, needed_cols].copy()
+    df['cluster_id'] = cluster_by_impression.loc[valid_mask].values
+
+    total_users = users_unique['user_id'].nunique()
+
+    # --- Basic cluster sizes --------------------------------------------------------
+    cluster_sizes = users_unique.groupby('cluster_id')['user_id'].nunique()
+    cluster_pct = (cluster_sizes / total_users * 100).round(2)
+
+    # --- Subscriber counts (post-hoc, not a clustering feature) ---------------------
+    if 'is_subscriber' in impressions_df.columns:
+        sub_per_user = impressions_df.loc[valid_mask, ['user_id', 'is_subscriber']].groupby('user_id')['is_subscriber'].any().astype(int)
+        sub_per_user = sub_per_user.reindex(user_cluster.index, fill_value=0)
+        sub_counts = sub_per_user.groupby(user_cluster).sum()
+    else:
+        sub_counts = pd.Series(0, index=cluster_sizes.index)
+
+    # --- Per-user metrics (then average per cluster) --------------------------------
+    is_homepage = df['article_id'].isna() | df['article_id'].eq('homepage')
+    zero_user = pd.Series(0.0, index=user_cluster.index)
+
+    if 'read_time' in df.columns:
+        avg_reading_time = df.groupby('user_id')['read_time'].mean().reindex(user_cluster.index, fill_value=0)
+        article_reading_time = df.loc[~is_homepage].groupby('user_id')['read_time'].sum().reindex(user_cluster.index, fill_value=0)
+        total_reading_time = df.groupby('user_id')['read_time'].sum().reindex(user_cluster.index, fill_value=0)
+        proportion_article_time = (article_reading_time / total_reading_time).replace([np.inf, -np.inf], 0).fillna(0)
+        avg_rt_homepage = df.loc[is_homepage].groupby('user_id')['read_time'].mean().reindex(user_cluster.index, fill_value=0)
+        avg_rt_articles = df.loc[~is_homepage].groupby('user_id')['read_time'].mean().reindex(user_cluster.index, fill_value=0)
+    else:
+        avg_reading_time = zero_user
+        proportion_article_time = zero_user
+        avg_rt_homepage = zero_user
+        avg_rt_articles = zero_user
+
+    has_session = 'session_id' in df.columns
+    has_category = 'category_str' in df.columns
+
+    if has_session:
+        articles_per_session = df.loc[~is_homepage].groupby(['user_id', 'session_id']).size()
+        avg_articles_per_session = articles_per_session.groupby('user_id').mean().reindex(user_cluster.index, fill_value=0)
+    else:
+        avg_articles_per_session = zero_user
+
+    if has_category:
+        valid_cat = df['category_str'].notna() & (df['category_str'] != '')
+        num_categories = (
+            df.loc[valid_cat]
+            .groupby('user_id')['category_str']
+            .nunique()
+            .reindex(user_cluster.index, fill_value=0)
+        )
+    else:
+        num_categories = zero_user
+
+    time_seconds = None
+    if 'impression_time' in df.columns:
+        ts = df['impression_time']
+        if ts.dtype in ['int64', 'float64']:
+            divisor = 1000 if ts.max() > 10**12 else 1
+            time_seconds = ts / divisor
+            dt = pd.to_datetime(ts // divisor, unit='s')
+        else:
+            dt = pd.to_datetime(ts, errors='coerce')
+            time_seconds = dt.astype('int64') / 1e9
+        hour = dt.dt.hour
+        time_flags = pd.DataFrame({
+            'user_id': df['user_id'].values,
+            'morning': ((hour >= 6) & (hour < 12)).values,
+            'afternoon': ((hour >= 12) & (hour < 18)).values,
+            'evening': ((hour >= 18) & (hour < 24)).values,
+            'night': ((hour >= 0) & (hour < 6)).values,
+        })
+        time_means = time_flags.groupby('user_id').mean()
+        pct_morning = time_means['morning'].reindex(user_cluster.index, fill_value=0)
+        pct_afternoon = time_means['afternoon'].reindex(user_cluster.index, fill_value=0)
+        pct_evening = time_means['evening'].reindex(user_cluster.index, fill_value=0)
+        pct_night = time_means['night'].reindex(user_cluster.index, fill_value=0)
+    else:
+        pct_morning = pct_afternoon = pct_evening = pct_night = zero_user
+
+    if has_session and time_seconds is not None:
+        session_time_bounds = (
+            pd.DataFrame({
+                'user_id': df['user_id'].values,
+                'session_id': df['session_id'].values,
+                '_ts': time_seconds.values if hasattr(time_seconds, 'values') else time_seconds,
+            })
+            .groupby(['user_id', 'session_id'])['_ts']
+            .agg(['max', 'min'])
+        )
+        session_dur = session_time_bounds['max'] - session_time_bounds['min']
+        avg_session_duration = session_dur.groupby('user_id').mean().reindex(user_cluster.index, fill_value=0)
+    else:
+        avg_session_duration = zero_user
+
+    if has_session and has_category:
+        valid_cat_df = df.loc[df['category_str'].notna() & (df['category_str'] != ''), ['user_id', 'session_id', 'category_str']].copy()
+        if not valid_cat_df.empty:
+            if 'impression_time' in df.columns:
+                valid_cat_df['_ts'] = time_seconds.loc[valid_cat_df.index].values if hasattr(time_seconds, 'loc') else 0
+                valid_cat_df = valid_cat_df.sort_values(['user_id', 'session_id', '_ts'])
+            session_keys = ['user_id', 'session_id']
+            shifted = valid_cat_df.groupby(session_keys)['category_str'].shift(1)
+            switches = ((valid_cat_df['category_str'] != shifted) & shifted.notna()).astype(int)
+            switches_per_session = switches.groupby([valid_cat_df['user_id'], valid_cat_df['session_id']]).sum()
+            session_sizes = valid_cat_df.groupby(session_keys).size()
+            valid_sessions = session_sizes[session_sizes > 1].index
+            switches_per_session = switches_per_session.loc[switches_per_session.index.isin(valid_sessions)]
+            avg_cat_switches = switches_per_session.groupby(level=0).mean().reindex(user_cluster.index, fill_value=0)
+        else:
+            avg_cat_switches = zero_user
+    else:
+        avg_cat_switches = zero_user
+
+    # --- Build per-user table, then average per cluster -----------------------------
+    user_metrics = pd.DataFrame(index=user_cluster.index)
+    user_metrics['cluster_id'] = user_cluster.values
+    user_metrics['avg_reading_time'] = avg_reading_time
+    user_metrics['proportion_article_time'] = proportion_article_time
+    user_metrics['avg_reading_time_homepage'] = avg_rt_homepage
+    user_metrics['avg_reading_time_articles'] = avg_rt_articles
+    user_metrics['avg_articles_per_session'] = avg_articles_per_session
+    user_metrics['avg_categories_read'] = num_categories
+    user_metrics['avg_session_duration'] = avg_session_duration
+    user_metrics['avg_category_switches'] = avg_cat_switches
+    user_metrics['pct_morning'] = pct_morning
+    user_metrics['pct_afternoon'] = pct_afternoon
+    user_metrics['pct_evening'] = pct_evening
+    user_metrics['pct_night'] = pct_night
+    user_metrics = user_metrics.fillna(0)
+
+    cluster_means = user_metrics.groupby('cluster_id').mean().round(4)
+
+    summary = pd.DataFrame({
+        'Number of Users': cluster_sizes,
+        'Percentage of Users (%)': cluster_pct,
+        'Number of Subscribers': sub_counts,
+        'Avg Reading Time (s)': cluster_means['avg_reading_time'],
+        'Proportion of Time on Articles': cluster_means['proportion_article_time'],
+        'Avg Reading Time Homepage (s)': cluster_means['avg_reading_time_homepage'],
+        'Avg Reading Time Articles (s)': cluster_means['avg_reading_time_articles'],
+        'Avg Articles per Session': cluster_means['avg_articles_per_session'],
+        'Avg Categories Read': cluster_means['avg_categories_read'],
+        'Avg Session Duration (s)': cluster_means['avg_session_duration'],
+        'Avg Category Switches per Session': cluster_means['avg_category_switches'],
+        'Morning (%)': (cluster_means['pct_morning'] * 100).round(2),
+        'Afternoon (%)': (cluster_means['pct_afternoon'] * 100).round(2),
+        'Evening (%)': (cluster_means['pct_evening'] * 100).round(2),
+        'Night (%)': (cluster_means['pct_night'] * 100).round(2),
+    })
+
+    return summary
+
+
 def save_cluster_profiles_excel(
     features_df: 'pd.DataFrame',
     labels: 'np.ndarray',
@@ -412,11 +595,16 @@ def save_cluster_profiles_excel(
     feature_names: list,
     eval_metrics: dict,
     session: Session,
+    scaler=None,
+    impressions_df: 'pd.DataFrame | None' = None,
 ) -> Path:
     """Save cluster profiles to an Excel file in the clusters/ directory.
 
     Creates a multi-sheet workbook:
-      - **Cluster Centers**: centroid values per feature (scaled).
+      - **Cluster Summary**: legacy-style interpretable report with raw averages,
+        subscriber counts, and time-of-day breakdown (computed from raw
+        impressions when available).
+      - **Cluster Centers (Scaled)**: centroid values per feature (scaled).
       - **Cluster Statistics**: mean and std of every feature per cluster
         plus cluster size.
       - **Summary**: metadata (n_clusters, n_users, features, eval metrics).
@@ -428,6 +616,11 @@ def save_cluster_profiles_excel(
         feature_names: Ordered list of feature column names.
         eval_metrics: Dict of evaluation metrics (silhouette etc.).
         session: Current pipeline session.
+        scaler: Fitted scaler (e.g. StandardScaler) to inverse-transform
+                cluster centers into interpretable values.
+        impressions_df: Raw impressions DataFrame (with homepage views).
+                        When provided, the Cluster Summary sheet is computed
+                        directly from raw data for maximum interpretability.
 
     Returns:
         Path to the written Excel file.
@@ -437,21 +630,33 @@ def save_cluster_profiles_excel(
 
     excel_path = session.get_path("cluster_profiles.xlsx", subdir="clusters")
 
-    # --- Sheet 1: Cluster Centers ---------------------------------------------------
-    centers = cluster_centers.copy()
-    # Add cluster size
     unique, counts = np.unique(labels, return_counts=True)
     size_map = dict(zip(unique, counts))
+
+    # --- Sheet 1: Cluster Summary (interpretable) -----------------------------------
+    if impressions_df is not None:
+        users_df = features_df[['user_id', 'cluster_id']].drop_duplicates()
+        cluster_summary = _compute_cluster_summary(impressions_df, users_df)
+    elif scaler is not None:
+        # Fallback: inverse-transform cluster centers
+        center_vals = cluster_centers[feature_names].values
+        raw_center_vals = scaler.inverse_transform(center_vals)
+        cluster_summary = pd.DataFrame(raw_center_vals, columns=feature_names)
+        cluster_summary.insert(0, "cluster_id", cluster_centers["cluster_id"].values)
+        cluster_summary.insert(1, "size", cluster_summary["cluster_id"].map(size_map))
+    else:
+        cluster_summary = None
+
+    # --- Sheet 2: Cluster Centers (Scaled) ------------------------------------------
+    centers = cluster_centers.copy()
     centers.insert(1, "size", centers["cluster_id"].map(size_map))
-    pct = centers["size"] / len(labels) * 100
-    centers.insert(2, "size_pct", pct.round(2))
+    pct_scaled = centers["size"] / len(labels) * 100
+    centers.insert(2, "size_pct", pct_scaled.round(2))
 
-    # --- Sheet 2: Cluster Statistics (mean + std per feature) -----------------------
+    # --- Sheet 3: Cluster Statistics (mean + std per feature) -----------------------
     stats = get_cluster_statistics(features_df, labels, feature_cols=feature_names)
-    # Reformat: one row per cluster, columns = feature_mean, feature_std
-    # Already in that format from get_cluster_statistics
 
-    # --- Sheet 3: Summary -----------------------------------------------------------
+    # --- Sheet 4: Summary -----------------------------------------------------------
     summary_rows = [
         ("Number of clusters", int(len(np.unique(labels)))),
         ("Total users", int(len(labels))),
@@ -465,7 +670,9 @@ def save_cluster_profiles_excel(
 
     # --- Write workbook -------------------------------------------------------------
     with pd.ExcelWriter(excel_path, engine="openpyxl") as writer:
-        centers.to_excel(writer, sheet_name="Cluster Centers", index=False)
+        if cluster_summary is not None:
+            cluster_summary.to_excel(writer, sheet_name="Cluster Summary")
+        centers.to_excel(writer, sheet_name="Cluster Centers (Scaled)", index=False)
         stats.to_excel(writer, sheet_name="Cluster Statistics", index=False)
         summary_df.to_excel(writer, sheet_name="Summary", index=False)
 
@@ -561,6 +768,8 @@ def run_clustering(
         feature_names=extractor.get_feature_names(),
         eval_metrics=eval_metrics,
         session=session,
+        scaler=extractor.get_metadata().get('scaler'),
+        impressions_df=impressions_df,
     )
     
     return features_df, labels, {
@@ -739,6 +948,7 @@ def main():
             articles_df, impressions_df, config, session,
             full_content=args.full_content,
         )
+        gc.collect()
         
         # Step 3: Clustering
         if args.skip_clustering:
@@ -749,6 +959,11 @@ def main():
                 impressions_df, articles_df, config, session
             )
             users_df = features_df[['user_id', 'cluster_id']]
+            del features_df, labels, cluster_info
+
+        # Raw article/impression frames are not needed after clustering.
+        del articles_df, impressions_df
+        gc.collect()
         
         # Step 4: Evaluation
         if not args.skip_evaluation:
@@ -756,6 +971,11 @@ def main():
             results = run_evaluation(
                 interactions_df, users_df, content_df, config, session
             )
+            del content_df, results
+            gc.collect()
+
+        del interactions_df, users_df
+        gc.collect()
         
         logger.info("=" * 60)
         logger.info("Pipeline completed successfully!")

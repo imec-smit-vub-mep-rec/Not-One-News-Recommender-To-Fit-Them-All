@@ -65,7 +65,28 @@ def compute_significance(
     results_a = np.array(results_a)
     results_b = np.array(results_b)
     
-    if test == 'ttest':
+    if test == 'bootstrap':
+        # Bootstrap CI for the mean paired difference, robust for small samples.
+        if len(results_a) != len(results_b):
+            raise ValueError("Bootstrap test requires paired samples of equal length")
+        diffs = results_a - results_b
+        if diffs.size == 0:
+            raise ValueError("No data points for bootstrap test")
+        rng = np.random.default_rng(42)
+        n_bootstrap = 5000
+        sampled_means = np.empty(n_bootstrap, dtype=np.float64)
+        for i in range(n_bootstrap):
+            sample = rng.choice(diffs, size=diffs.size, replace=True)
+            sampled_means[i] = sample.mean()
+        statistic = float(diffs.mean())
+        ci_low, ci_high = np.percentile(sampled_means, [2.5, 97.5])
+        # Two-sided p-value approximation from bootstrap distribution.
+        p_value = 2.0 * min(
+            float(np.mean(sampled_means >= 0)),
+            float(np.mean(sampled_means <= 0)),
+        )
+        p_value = float(np.clip(p_value, 0.0, 1.0))
+    elif test == 'ttest':
         statistic, p_value = stats.ttest_ind(results_a, results_b)
     elif test == 'wilcoxon':
         statistic, p_value = stats.wilcoxon(results_a, results_b)
@@ -74,7 +95,7 @@ def compute_significance(
     else:
         raise ValueError(f"Unknown test: {test}")
     
-    return {
+    result = {
         'test': test,
         'statistic': statistic,
         'p_value': p_value,
@@ -87,6 +108,10 @@ def compute_significance(
             np.sqrt((np.std(results_a)**2 + np.std(results_b)**2) / 2) + 1e-10
         ),
     }
+    if test == 'bootstrap':
+        result['ci_low'] = float(ci_low)
+        result['ci_high'] = float(ci_high)
+    return result
 
 
 def compare_algorithms(
@@ -346,7 +371,7 @@ class ResultsAnalyzer:
         algorithm_a: str,
         algorithm_b: str,
         metric: str = 'NDCGK_10',
-        test: str = 'ttest',
+        test: str = 'bootstrap',
     ) -> Dict[str, Any]:
         """Test significance between two algorithms.
         
@@ -371,13 +396,20 @@ class ResultsAnalyzer:
                 results_b.append(b_val[0])
         
         if len(results_a) < 2:
-            return {'error': 'Not enough data points'}
+            return {'error': 'Not enough paired data points'}
         
         return compute_significance(results_a, results_b, test)
     
     def generate_report(
         self,
-        metrics: List[str] = ['NDCGK_10', 'NDCGK_20', 'RecallK_10', 'RecallK_20'],
+        metrics: List[str] = [
+            'NDCGK_10',
+            'NDCGK_20',
+            'RecallK_10',
+            'RecallK_20',
+            'CoverageK_10',
+            'GiniK_10',
+        ],
     ) -> str:
         """Generate a text report of results.
         
