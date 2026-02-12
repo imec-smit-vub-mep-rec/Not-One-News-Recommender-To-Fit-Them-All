@@ -409,6 +409,8 @@ def run_preprocessing(
 def _compute_cluster_summary(
     impressions_df: 'pd.DataFrame',
     users_df: 'pd.DataFrame',
+    subscriber_label: str = "Number of Subscribers",
+    articles_df: 'pd.DataFrame | None' = None,
 ) -> 'pd.DataFrame':
     """Compute the legacy-style cluster summary from raw impressions.
 
@@ -418,6 +420,12 @@ def _compute_cluster_summary(
     Args:
         impressions_df: Raw impressions DataFrame (with homepage views).
         users_df: DataFrame with ``user_id`` and ``cluster_id`` columns.
+        articles_df: Optional articles DataFrame with ``article_id`` and
+                     ``category_str`` columns.  When provided and
+                     ``category_str`` is not already in *impressions_df*,
+                     the category information is merged in so that
+                     "Avg Categories Read" and category-switch metrics can
+                     be computed.
 
     Returns:
         DataFrame indexed by cluster_id with one row per cluster.
@@ -436,6 +444,11 @@ def _compute_cluster_summary(
     needed_cols = [c for c in ['user_id', 'article_id', 'read_time', 'session_id', 'category_str', 'impression_time'] if c in impressions_df.columns]
     df = impressions_df.loc[valid_mask, needed_cols].copy()
     df['cluster_id'] = cluster_by_impression.loc[valid_mask].values
+
+    # Merge category info from articles if not already present in impressions
+    if 'category_str' not in df.columns and articles_df is not None and 'category_str' in articles_df.columns:
+        cat_lookup = articles_df[['article_id', 'category_str']].drop_duplicates(subset='article_id')
+        df = df.merge(cat_lookup, on='article_id', how='left')
 
     total_users = users_unique['user_id'].nunique()
 
@@ -570,7 +583,7 @@ def _compute_cluster_summary(
     summary = pd.DataFrame({
         'Number of Users': cluster_sizes,
         'Percentage of Users (%)': cluster_pct,
-        'Number of Subscribers': sub_counts,
+        subscriber_label: sub_counts,
         'Avg Reading Time (s)': cluster_means['avg_reading_time'],
         'Proportion of Time on Articles': cluster_means['proportion_article_time'],
         'Avg Reading Time Homepage (s)': cluster_means['avg_reading_time_homepage'],
@@ -597,6 +610,8 @@ def save_cluster_profiles_excel(
     session: Session,
     scaler=None,
     impressions_df: 'pd.DataFrame | None' = None,
+    articles_df: 'pd.DataFrame | None' = None,
+    subscriber_label: str = "Number of Subscribers",
 ) -> Path:
     """Save cluster profiles to an Excel file in the clusters/ directory.
 
@@ -621,6 +636,11 @@ def save_cluster_profiles_excel(
         impressions_df: Raw impressions DataFrame (with homepage views).
                         When provided, the Cluster Summary sheet is computed
                         directly from raw data for maximum interpretability.
+        articles_df: Optional articles DataFrame with ``article_id`` and
+                     ``category_str``.  Passed through to
+                     ``_compute_cluster_summary`` so that category-based
+                     metrics can be computed even when *impressions_df*
+                     does not contain category information.
 
     Returns:
         Path to the written Excel file.
@@ -636,7 +656,7 @@ def save_cluster_profiles_excel(
     # --- Sheet 1: Cluster Summary (interpretable) -----------------------------------
     if impressions_df is not None:
         users_df = features_df[['user_id', 'cluster_id']].drop_duplicates()
-        cluster_summary = _compute_cluster_summary(impressions_df, users_df)
+        cluster_summary = _compute_cluster_summary(impressions_df, users_df, subscriber_label=subscriber_label, articles_df=articles_df)
     elif scaler is not None:
         # Fallback: inverse-transform cluster centers
         center_vals = cluster_centers[feature_names].values
@@ -761,6 +781,8 @@ def run_clustering(
     logger.info(f"Saved visualizations to {viz_dir}")
     
     # Save cluster profiles Excel to clusters/ directory
+    subscriber_label = "Number of Logged In Users" if config.dataset.name == "ad" else "Number of Subscribers"
+
     save_cluster_profiles_excel(
         features_df=features_df,
         labels=labels,
@@ -770,6 +792,8 @@ def run_clustering(
         session=session,
         scaler=extractor.get_metadata().get('scaler'),
         impressions_df=impressions_df,
+        articles_df=articles_df,
+        subscriber_label=subscriber_label,
     )
     
     return features_df, labels, {
