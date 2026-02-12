@@ -28,6 +28,7 @@ from src.utils import Session, setup_logging, get_logger, load_dataframe, save_d
 from src.converters import ADConverter, AdressaConverter, EBNeRDConverter, GenericConverter
 from src.preprocessing import DataCleaner, DataValidator, behaviors_to_interactions, articles_to_content
 from src.clustering import UserFeatureExtractor, KMeansClusterer, ClusterVisualizer
+from src.clustering.clustering import get_cluster_statistics
 
 
 logger = get_logger("pipeline")
@@ -404,6 +405,74 @@ def run_preprocessing(
     return cleaned_articles, cleaned_impressions, interactions_df
 
 
+def save_cluster_profiles_excel(
+    features_df: 'pd.DataFrame',
+    labels: 'np.ndarray',
+    cluster_centers: 'pd.DataFrame',
+    feature_names: list,
+    eval_metrics: dict,
+    session: Session,
+) -> Path:
+    """Save cluster profiles to an Excel file in the clusters/ directory.
+
+    Creates a multi-sheet workbook:
+      - **Cluster Centers**: centroid values per feature (scaled).
+      - **Cluster Statistics**: mean and std of every feature per cluster
+        plus cluster size.
+      - **Summary**: metadata (n_clusters, n_users, features, eval metrics).
+
+    Args:
+        features_df: DataFrame with user features *and* ``cluster_id`` column.
+        labels: Cluster label array.
+        cluster_centers: Cluster centers DataFrame from the clusterer.
+        feature_names: Ordered list of feature column names.
+        eval_metrics: Dict of evaluation metrics (silhouette etc.).
+        session: Current pipeline session.
+
+    Returns:
+        Path to the written Excel file.
+    """
+    import numpy as np
+    import pandas as pd
+
+    excel_path = session.get_path("cluster_profiles.xlsx", subdir="clusters")
+
+    # --- Sheet 1: Cluster Centers ---------------------------------------------------
+    centers = cluster_centers.copy()
+    # Add cluster size
+    unique, counts = np.unique(labels, return_counts=True)
+    size_map = dict(zip(unique, counts))
+    centers.insert(1, "size", centers["cluster_id"].map(size_map))
+    pct = centers["size"] / len(labels) * 100
+    centers.insert(2, "size_pct", pct.round(2))
+
+    # --- Sheet 2: Cluster Statistics (mean + std per feature) -----------------------
+    stats = get_cluster_statistics(features_df, labels, feature_cols=feature_names)
+    # Reformat: one row per cluster, columns = feature_mean, feature_std
+    # Already in that format from get_cluster_statistics
+
+    # --- Sheet 3: Summary -----------------------------------------------------------
+    summary_rows = [
+        ("Number of clusters", int(len(np.unique(labels)))),
+        ("Total users", int(len(labels))),
+        ("Number of features", len(feature_names)),
+        ("Features", ", ".join(feature_names)),
+    ]
+    for key, val in eval_metrics.items():
+        summary_rows.append((key, val))
+
+    summary_df = pd.DataFrame(summary_rows, columns=["Metric", "Value"])
+
+    # --- Write workbook -------------------------------------------------------------
+    with pd.ExcelWriter(excel_path, engine="openpyxl") as writer:
+        centers.to_excel(writer, sheet_name="Cluster Centers", index=False)
+        stats.to_excel(writer, sheet_name="Cluster Statistics", index=False)
+        summary_df.to_excel(writer, sheet_name="Summary", index=False)
+
+    logger.info(f"Saved cluster profiles Excel to {excel_path}")
+    return excel_path
+
+
 def run_clustering(
     impressions_df,
     articles_df,
@@ -483,6 +552,16 @@ def run_clustering(
     visualizer.plot_profiles(cluster_centers)
     
     logger.info(f"Saved visualizations to {viz_dir}")
+    
+    # Save cluster profiles Excel to clusters/ directory
+    save_cluster_profiles_excel(
+        features_df=features_df,
+        labels=labels,
+        cluster_centers=cluster_centers,
+        feature_names=extractor.get_feature_names(),
+        eval_metrics=eval_metrics,
+        session=session,
+    )
     
     return features_df, labels, {
         'n_clusters': clusterer.n_clusters,
