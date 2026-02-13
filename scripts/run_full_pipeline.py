@@ -25,7 +25,7 @@ import gc
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.config import PipelineConfig, load_config, save_config, PRESET_CONFIGS
-from src.utils import Session, setup_logging, get_logger, load_dataframe, save_dataframe
+from src.utils import Session, setup_logging, get_logger, load_dataframe, save_dataframe, log_memory
 from src.converters import ADConverter, AdressaConverter, EBNeRDConverter, GenericConverter
 from src.preprocessing import DataCleaner, DataValidator, behaviors_to_interactions, articles_to_content
 from src.clustering import UserFeatureExtractor, KMeansClusterer, ClusterVisualizer
@@ -174,9 +174,16 @@ def parse_args():
     )
     
     parser.add_argument(
+        "--content-mode",
+        type=str,
+        choices=["legacy", "full", "embeddings"],
+        help="Content mode for CB-ST: legacy (category+title), full (category+title+body), or embeddings (pre-calculated only)",
+    )
+
+    parser.add_argument(
         "--full-content",
         action="store_true",
-        help="Use full article content (title + body) for CB-ST instead of just category + title (legacy default)",
+        help="DEPRECATED: equivalent to --content-mode full",
     )
     
     parser.add_argument(
@@ -271,6 +278,10 @@ def load_or_create_config(args) -> PipelineConfig:
     if args.legacy_features:
         config.clustering.legacy_features = True
         logger.info("CLI override: clustering.legacy_features = True")
+
+    if args.content_mode:
+        config.evaluation.content_mode = args.content_mode
+        logger.info(f"CLI override: evaluation.content_mode = {args.content_mode}")
     
     return config
 
@@ -334,7 +345,7 @@ def run_preprocessing(
     impressions_df,
     config: PipelineConfig,
     session: Session,
-    full_content: bool = False,
+    content_mode: str = "legacy",
 ) -> tuple:
     """Run preprocessing step for CLUSTERING.
     
@@ -394,14 +405,15 @@ def run_preprocessing(
     logger.info(f"Saved {len(interactions_df)} article interactions to {interactions_path}")
     logger.info(f"NOTE: interactions.csv excludes homepage views (for RecPack evaluation)")
     
-    # Create article content for content-based
-    # Default: category + title only (legacy behavior)
-    # With full_content=True: category + title + body (richer but slower)
-    content_df = articles_to_content(cleaned_articles, full_content=full_content)
-    
-    content_path = session.get_path("articles_content.csv")
-    save_dataframe(content_df, content_path, format="csv")
-    logger.info(f"Saved article content to {content_path}")
+    # Create article content for content-based unless embeddings-only mode is selected.
+    if content_mode == "embeddings":
+        logger.info("Skipping content generation (EMBEDDINGS mode uses pre-calculated vectors)")
+    else:
+        full_content = content_mode == "full"
+        content_df = articles_to_content(cleaned_articles, full_content=full_content)
+        content_path = session.get_path("articles_content.csv")
+        save_dataframe(content_df, content_path, format="csv")
+        logger.info(f"Saved article content to {content_path}")
     
     return cleaned_articles, cleaned_impressions, interactions_df
 
@@ -809,6 +821,7 @@ def run_evaluation(
     content_df,
     config: PipelineConfig,
     session: Session,
+    content_mode: str = "legacy",
 ) -> dict:
     """Run evaluation step.
     
@@ -834,6 +847,8 @@ def run_evaluation(
         logger.error("RecPack may not be installed. Install with: pip install recpack")
         return {}
     
+    log_memory("evaluation start")
+
     # Check for pre-calculated embeddings file (REQUIRED for CB-ST)
     embeddings_df = None
     embedding_column = 'embedding'  # Column name from generate_embeddings.py
@@ -858,7 +873,7 @@ def run_evaluation(
         embeddings_df = pd.read_parquet(embeddings_path)
         logger.info(f"Loaded embeddings for {len(embeddings_df)} articles")
         logger.info(f"Using embedding column: '{embedding_column}'")
-    elif cb_st_enabled:
+    elif cb_st_enabled or content_mode == "embeddings":
         # CB-ST requires pre-calculated embeddings - throw error
         logger.error("=" * 60)
         logger.error("ERROR: Pre-calculated embeddings are REQUIRED for CB-ST")
@@ -871,8 +886,8 @@ def run_evaluation(
         logger.error("Or disable CB-ST by removing it from the algorithms list.")
         logger.error("=" * 60)
         raise FileNotFoundError(
-            f"Pre-calculated embeddings required for CB-ST but not found at {embeddings_path}. "
-            f"Generate with: python scripts/generate_embeddings.py --input-dir {input_path}"
+            f"Pre-calculated embeddings required for content_mode='{content_mode}' but not found at "
+            f"{embeddings_path}. Generate with: python scripts/generate_embeddings.py --input-dir {input_path}"
         )
     else:
         logger.info(f"No pre-calculated embeddings found at {embeddings_path}")
@@ -897,6 +912,8 @@ def run_evaluation(
         embedding_column=embedding_column,
     )
     
+    log_memory("evaluation after cluster run")
+
     # Analyze results
     analyzer = ResultsAnalyzer(results)
     
@@ -910,6 +927,7 @@ def run_evaluation(
     logger.info(f"Saved evaluation report to {report_path}")
     print("\n" + report)
     
+    log_memory("evaluation end")
     return results
 
 
@@ -944,8 +962,17 @@ def main():
         logger.info("Feature mode: MODERN (includes per-category proportions, time-of-day, entropy/gini)")
     logger.info(f"N clusters: {config.clustering.n_clusters or 'auto-detect'}")
     logger.info(f"K selection method: {config.clustering.k_selection_method}")
+    content_mode = getattr(config.evaluation, "content_mode", "legacy")
     if args.full_content:
+        logger.warning("--full-content is deprecated; use --content-mode full")
+        content_mode = "full"
+    if args.content_mode:
+        content_mode = args.content_mode
+
+    if content_mode == "full":
         logger.info("CB-ST content: FULL (category + title + body)")
+    elif content_mode == "embeddings":
+        logger.info("CB-ST content: EMBEDDINGS (pre-calculated bert_embedding)")
     else:
         logger.info("CB-ST content: LEGACY (category + title only)")
     logger.info("=" * 60)
@@ -970,7 +997,7 @@ def main():
         # Step 2: Preprocessing
         articles_df, impressions_df, interactions_df = run_preprocessing(
             articles_df, impressions_df, config, session,
-            full_content=args.full_content,
+            content_mode=content_mode,
         )
         gc.collect()
         
@@ -991,11 +1018,15 @@ def main():
         
         # Step 4: Evaluation
         if not args.skip_evaluation:
-            content_df = load_dataframe(session.get_path("articles_content.csv"))
+            content_df = None
+            if content_mode != "embeddings":
+                content_df = load_dataframe(session.get_path("articles_content.csv"))
             results = run_evaluation(
-                interactions_df, users_df, content_df, config, session
+                interactions_df, users_df, content_df, config, session, content_mode=content_mode
             )
-            del content_df, results
+            del results
+            if content_df is not None:
+                del content_df
             gc.collect()
 
         del interactions_df, users_df

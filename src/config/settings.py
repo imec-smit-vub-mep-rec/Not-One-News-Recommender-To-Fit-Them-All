@@ -152,6 +152,7 @@ class EvaluationConfig:
     optimization_k: int = 100
     
     # Content-based algorithm settings
+    content_mode: str = "legacy"
     content_model: str = 'intfloat/multilingual-e5-large'
     content_embedding_dim: Optional[int] = 1024
     content_n_trees: int = 20

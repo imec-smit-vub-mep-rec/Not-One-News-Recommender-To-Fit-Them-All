@@ -10,6 +10,7 @@ from .io import (
 from .logging import (
     setup_logging,
     get_logger,
+    log_memory,
 )
 from .session import (
     Session,
@@ -25,6 +26,7 @@ __all__ = [
     # Logging
     "setup_logging",
     "get_logger",
+    "log_memory",
     # Session
     "Session",
 ]

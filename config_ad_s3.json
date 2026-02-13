@@ -12,6 +12,7 @@
       "legacy_features": true
     },
     "evaluation": {
-      "k_values": [10, 20, 50]
+      "k_values": [10, 20, 50],
+      "content_mode": "embeddings"
     }
   }

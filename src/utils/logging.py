@@ -9,6 +9,12 @@ import sys
 from pathlib import Path
 from typing import Optional, Union
 from datetime import datetime
+import os
+
+try:
+    import psutil
+except ImportError:  # pragma: no cover - optional dependency at runtime
+    psutil = None
 
 
 # Default format for log messages
@@ -85,6 +91,25 @@ def get_logger(name: str) -> logging.Logger:
         Logger instance
     """
     return logging.getLogger(f"ricon.{name}")
+
+
+def log_memory(label: str, logger: Optional[logging.Logger] = None) -> None:
+    """Log process/system memory stats for OOM diagnostics."""
+    if logger is None:
+        logger = get_logger("memory")
+
+    if psutil is None:
+        logger.info(f"[MEMORY] {label} | psutil unavailable")
+        return
+
+    process = psutil.Process(os.getpid())
+    rss_gb = process.memory_info().rss / (1024 ** 3)
+    vmem = psutil.virtual_memory()
+    avail_gb = vmem.available / (1024 ** 3)
+    used_pct = vmem.percent
+    logger.info(
+        f"[MEMORY] {label} | rss={rss_gb:.2f}GB | available={avail_gb:.2f}GB | used={used_pct:.1f}%"
+    )
 
 
 class ProgressLogger:

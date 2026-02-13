@@ -9,8 +9,9 @@ import pandas as pd
 import numpy as np
 from pathlib import Path
 from scipy.sparse import issparse
+import gc
 
-from ..utils.logging import get_logger
+from ..utils.logging import get_logger, log_memory
 from ..utils.io import load_dataframe, save_dataframe, ensure_dir
 
 
@@ -22,7 +23,6 @@ try:
     from recpack.preprocessing.preprocessors import DataFramePreprocessor
     from recpack.preprocessing.filters import MinItemsPerUser, MinUsersPerItem
     from recpack.scenarios import LastItemPrediction
-    from recpack.pipelines import PipelineBuilder
     from recpack.algorithms import Popularity, ItemKNN, EASE
     from recpack.matrix import InteractionMatrix
     HAS_RECPACK = True
@@ -134,33 +134,6 @@ def _fit_and_predict_algorithm(algo_instance: Any, train_data: Any, test_in_data
         return algo_instance._predict(test_in_data)
 
     raise AttributeError(f"{algo_instance.__class__.__name__} has no predict/_predict method")
-
-
-def _extract_pipeline_predictions(pipeline: Any) -> Dict[str, Any]:
-    """Best-effort extraction of algorithm predictions from a RecPack pipeline."""
-    candidates: List[Any] = []
-    for attr in ("get_predictions", "predictions", "_predictions"):
-        obj = getattr(pipeline, attr, None)
-        if callable(obj):
-            try:
-                candidates.append(obj())
-            except Exception:
-                continue
-        elif obj is not None:
-            candidates.append(obj)
-
-    for cand in candidates:
-        if isinstance(cand, dict):
-            normalized: Dict[str, Any] = {}
-            for key, value in cand.items():
-                if hasattr(key, "__name__"):
-                    normalized[key.__name__] = value
-                else:
-                    normalized[str(key)] = value
-            if normalized:
-                return normalized
-
-    return {}
 
 
 def create_interaction_matrix(
@@ -297,7 +270,9 @@ def run_evaluation(
     """
     check_recpack_available()
     
-    available = get_available_algorithms(include_content_based=content_df is not None)
+    available = get_available_algorithms(
+        include_content_based=(content_df is not None or embeddings_df is not None)
+    )
     
     if algorithms is None:
         algorithms = list(available.keys())
@@ -320,15 +295,21 @@ def run_evaluation(
         logger.warning("Returning empty results for this subset")
         return pd.DataFrame()
     
-    # Build and run pipeline for standard RecPack algorithms
-    builder = PipelineBuilder()
-    builder.set_data_from_scenario(scenario)
-    
-    # Track which algorithms need special handling
-    cb_algo_instances = {}  # Store multiple CB instances with different backends
-    recpack_algorithms = []
-    
-    # Add algorithms
+    # Get train and test data from scenario.
+    train_matrix = scenario.full_training_data
+    test_in, test_out = scenario.test_data
+
+    train_data = train_matrix.values
+    test_in_data = test_in.values
+    test_out_data = test_out.values
+
+    if test_out_data is None or test_out_data.nnz == 0:
+        logger.warning("No test data available for evaluation")
+        return pd.DataFrame()
+
+    # Instantiate algorithms. All are evaluated through the same manual path so
+    # we always have access to predictions for diversity metrics.
+    algo_instances: Dict[str, Any] = {}
     for algo_name in algorithms:
         if algo_name not in available:
             logger.warning(f"Algorithm {algo_name} not available, skipping")
@@ -337,9 +318,8 @@ def run_evaluation(
         algo_class = available[algo_name]
         
         if algo_name in ('CB-ST', 'CB-ST-sklearn', 'CB-ST-annoy', 'SentenceTransformerContentBased'):
-            # Content-based algorithm needs special initialization - handle separately
+            # Content-based algorithm needs content/item mapping and optional embeddings.
             if (content_df is not None or embeddings_df is not None) and item_mapping is not None:
-                # Determine backend
                 if algo_name == 'CB-ST-sklearn':
                     backend = 'sklearn'
                     display_name = 'CB-ST-sklearn'
@@ -350,8 +330,7 @@ def run_evaluation(
                     backend = 'annoy'  # Default to annoy (faster)
                     display_name = 'CB-ST'
                 
-                # Use pre-calculated embeddings if available
-                cb_algo_instances[display_name] = algo_class(
+                algo_instances[display_name] = algo_class(
                     content=content_df if content_df is not None else {},
                     item_mapping=item_mapping,
                     backend=backend,
@@ -365,150 +344,49 @@ def run_evaluation(
             else:
                 logger.warning("Content-based algorithm requires content_df and item_mapping")
         else:
-            # Standard RecPack algorithms
-            builder.add_algorithm(algo_class)
-            recpack_algorithms.append(algo_name)
-    
-    # Add metrics
-    from recpack.metrics import NDCGK, RecallK, PrecisionK, CoverageK
-    
-    for k in k_values:
-        builder.add_metric(NDCGK, K=k)
-        builder.add_metric(RecallK, K=k)
-        builder.add_metric(PrecisionK, K=k)
-        builder.add_metric(CoverageK, K=k)
-    
-    # Run pipeline for standard algorithms
-    results_list = []
-    
-    if recpack_algorithms:
-        pipeline = builder.build()
-        pipeline.run()
-        
-        # Get results and format properly
-        results = pipeline.get_metrics(short=True)
-        results = results.reset_index()
-        results = results.rename(columns={'index': 'algorithm'})
+            algo_instances[algo_name] = algo_class()
 
-        # Normalize metric names to the project convention.
-        rename_map = {}
-        for k in k_values:
-            if f'Coverage_{k}' in results.columns:
-                rename_map[f'Coverage_{k}'] = f'CoverageK_{k}'
-            if f'CoverageK({k})' in results.columns:
-                rename_map[f'CoverageK({k})'] = f'CoverageK_{k}'
-        if rename_map:
-            results = results.rename(columns=rename_map)
-
-        # Compute diversity from the same prediction outputs produced by pipeline.run().
-        pipeline_predictions = _extract_pipeline_predictions(pipeline)
-        gini_by_algorithm: Dict[str, Dict[str, float]] = {}
-        for algo_name in recpack_algorithms:
-            try:
-                predictions = pipeline_predictions.get(algo_name)
-                if predictions is None:
-                    logger.warning(
-                        f"Predictions for '{algo_name}' not exposed by RecPack pipeline; "
-                        "diversity metrics will remain NaN for this algorithm."
-                    )
-                    continue
-                diversity = _compute_diversity_at_k(predictions, k_values)
-                gini_by_algorithm[algo_name] = {
-                    key: value for key, value in diversity.items() if key.startswith('GiniK_')
-                }
-
-                # Fallback coverage from predictions in case RecPack naming differs/missing.
-                for key, value in diversity.items():
-                    if key.startswith('CoverageK_') and key not in results.columns:
-                        gini_by_algorithm[algo_name][key] = value
-            except Exception as e:
-                logger.warning(f"Failed to compute diversity for {algo_name}: {e}")
-
-        for k in k_values:
-            gini_col = f'GiniK_{k}'
-            if gini_col not in results.columns:
-                results[gini_col] = np.nan
-            coverage_col = f'CoverageK_{k}'
-            if coverage_col not in results.columns:
-                results[coverage_col] = np.nan
-
-        for idx, row in results.iterrows():
-            algo_name = row.get('algorithm')
-            algo_metrics = gini_by_algorithm.get(algo_name, {})
-            for metric_name, metric_value in algo_metrics.items():
-                results.at[idx, metric_name] = metric_value
-
-        results_list.append(results)
-    
-    # Run CB-ST instances separately if configured
-    if cb_algo_instances:
-        # Get train and test data from scenario
-        # full_training_data is the data for training (before test time)
-        train_matrix = scenario.full_training_data
-        
-        # test_data is a tuple of (in_data, out_data)
-        # in_data is the known interactions for users in test set
-        # out_data is the ground truth (interactions to predict)
-        test_in, test_out = scenario.test_data
-        
-        # Convert to sparse matrices for our algorithm
-        train_data = train_matrix.values
-        test_in_data = test_in.values
-        test_out_data = test_out.values
-        
-        if test_out_data is None or test_out_data.nnz == 0:
-            logger.warning("No test data available for CB-ST evaluation")
-        else:
-            for cb_name, cb_algo_instance in cb_algo_instances.items():
-                try:
-                    logger.info(f"Running {cb_name} evaluation...")
-                    
-                    # Fit the model on training data
-                    cb_algo_instance._fit(train_data)
-                    
-                    # Predict for test users using their known interactions
-                    predictions = cb_algo_instance._predict(test_in_data)
-                    
-                    # Calculate metrics manually
-                    from recpack.metrics import NDCGK, RecallK, PrecisionK, CoverageK
-                    
-                    cb_results = {'algorithm': cb_name}
-                    diversity = _compute_diversity_at_k(predictions, k_values)
-                    for k in k_values:
-                        ndcg = NDCGK(k)
-                        recall = RecallK(k)
-                        precision = PrecisionK(k)
-                        coverage = CoverageK(k)
-                        
-                        ndcg.calculate(test_out_data, predictions)
-                        recall.calculate(test_out_data, predictions)
-                        precision.calculate(test_out_data, predictions)
-                        coverage.calculate(test_out_data, predictions)
-                        
-                        cb_results[f'NDCGK_{k}'] = ndcg.value
-                        cb_results[f'RecallK_{k}'] = recall.value
-                        cb_results[f'PrecisionK_{k}'] = precision.value
-                        cb_results[f'CoverageK_{k}'] = coverage.value
-                        cb_results[f'GiniK_{k}'] = diversity[f'GiniK_{k}']
-                    
-                    results_list.append(pd.DataFrame([cb_results]))
-                    logger.info(f"{cb_name} evaluation complete")
-
-                    # Explicit cleanup for memory management
-                    import gc
-                    del predictions
-                    gc.collect()
-
-                except Exception as e:
-                    logger.warning(f"Failed to run {cb_name}: {e}")
-                    import traceback
-                    logger.debug(traceback.format_exc())
-    
-    # Combine results
-    if results_list:
-        return pd.concat(results_list, ignore_index=True)
-    else:
+    if not algo_instances:
         return pd.DataFrame()
+
+    # Evaluate all algorithms manually.
+    from recpack.metrics import NDCGK, RecallK, PrecisionK, CoverageK
+    rows: List[Dict[str, Any]] = []
+    for algo_name, algo_instance in algo_instances.items():
+        try:
+            logger.info(f"Running {algo_name} evaluation...")
+            predictions = _fit_and_predict_algorithm(algo_instance, train_data, test_in_data)
+            diversity = _compute_diversity_at_k(predictions, k_values)
+
+            row: Dict[str, Any] = {'algorithm': algo_name}
+            for k in k_values:
+                ndcg = NDCGK(k)
+                recall = RecallK(k)
+                precision = PrecisionK(k)
+                coverage = CoverageK(k)
+
+                ndcg.calculate(test_out_data, predictions)
+                recall.calculate(test_out_data, predictions)
+                precision.calculate(test_out_data, predictions)
+                coverage.calculate(test_out_data, predictions)
+
+                row[f'NDCGK_{k}'] = ndcg.value
+                row[f'RecallK_{k}'] = recall.value
+                row[f'PrecisionK_{k}'] = precision.value
+                row[f'CoverageK_{k}'] = coverage.value
+                row[f'GiniK_{k}'] = diversity[f'GiniK_{k}']
+
+            rows.append(row)
+            log_memory(f"{algo_name} done")
+            del predictions
+            gc.collect()
+            logger.info(f"{algo_name} evaluation complete")
+        except Exception as e:
+            logger.warning(f"Failed to run {algo_name}: {e}")
+            import traceback
+            logger.debug(traceback.format_exc())
+
+    return pd.DataFrame(rows) if rows else pd.DataFrame()
 
 
 class RecPackPipeline:
@@ -713,10 +591,12 @@ def _evaluate_single_cluster(
         Tuple of (cluster_id, results DataFrame or None if skipped)
     """
     logger.info(f"Evaluating cluster {cluster_id} ({len(cluster_interactions)} interactions)...")
+    log_memory(f"cluster {cluster_id} start")
     
     # Skip if too few interactions
     if len(cluster_interactions) < 100:
         logger.warning(f"Cluster {cluster_id} has too few interactions, skipping")
+        log_memory(f"cluster {cluster_id} skipped")
         return cluster_id, None
     
     # Run pipeline (min_items_per_user filtering happens here)
@@ -740,11 +620,13 @@ def _evaluate_single_cluster(
             ensure_dir(output_dir)
             output_path = Path(output_dir) / f'cluster_{cluster_id}_results.csv'
             pipeline.save_results(str(output_path))
-        
+
+        log_memory(f"cluster {cluster_id} end")
         return cluster_id, cluster_results
     
     except Exception as e:
         logger.error(f"Error evaluating cluster {cluster_id}: {e}")
+        log_memory(f"cluster {cluster_id} error")
         return cluster_id, None
 
 
@@ -815,14 +697,15 @@ def run_cluster_evaluation(
     # Run evaluations
     if n_jobs == 1:
         # Sequential execution
-        results_list = [
-            _evaluate_single_cluster(
+        results_list = []
+        for cluster_id, cluster_interactions in cluster_data.items():
+            results_list.append(_evaluate_single_cluster(
                 cluster_id, cluster_interactions, content_df,
                 algorithms, k_values, min_items_per_user, output_dir,
                 embeddings_df, embedding_column
-            )
-            for cluster_id, cluster_interactions in cluster_data.items()
-        ]
+            ))
+            gc.collect()
+            log_memory("between clusters")
     else:
         # Parallel execution
         from joblib import Parallel, delayed
