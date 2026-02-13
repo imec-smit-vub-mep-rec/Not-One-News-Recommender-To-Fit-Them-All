@@ -493,7 +493,12 @@ def run_evaluation(
                     
                     results_list.append(pd.DataFrame([cb_results]))
                     logger.info(f"{cb_name} evaluation complete")
-                    
+
+                    # Explicit cleanup for memory management
+                    import gc
+                    del predictions
+                    gc.collect()
+
                 except Exception as e:
                     logger.warning(f"Failed to run {cb_name}: {e}")
                     import traceback

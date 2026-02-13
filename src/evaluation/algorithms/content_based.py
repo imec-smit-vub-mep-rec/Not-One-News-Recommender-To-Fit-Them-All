@@ -410,13 +410,17 @@ class SentenceTransformerContentBased(Algorithm):
         # Convert metric for Annoy
         annoy_metric = 'angular' if self.metric == 'cosine' else self.metric
         
+        # Ensure we're using memory-mapped mode if possible to reduce RAM usage
         self._annoy_index = AnnoyIndex(self._embedding_dim, annoy_metric)
         
         # CRITICAL: Use sequential indices (0, 1, 2, ...), NOT item_ids!
         for idx, embedding in enumerate(embeddings):
             self._annoy_index.add_item(idx, embedding)
         
-        self._annoy_index.build(self.annoy_n_trees)
+        # Build the index.
+        # -1 uses all available cores, but can increase memory usage.
+        # Using a fixed number of threads (e.g. 4) or 1 can be safer for memory.
+        self._annoy_index.build(self.annoy_n_trees, n_jobs=1)
         
         # Verify the index
         n_items = self._annoy_index.get_n_items()
