@@ -245,6 +245,7 @@ def run_evaluation(
     item_mapping: Optional[Dict] = None,
     embeddings_df: Optional[pd.DataFrame] = None,
     embedding_column: str = 'embedding',
+    batch_size: int = 10000,
 ) -> pd.DataFrame:
     """Run evaluation for multiple algorithms using LastItemPrediction scenario.
     
@@ -264,6 +265,7 @@ def run_evaluation(
         embeddings_df: Optional DataFrame with pre-calculated embeddings.
                        If provided, CB-ST will use these instead of encoding content.
         embedding_column: Column name in embeddings_df containing the embedding vectors.
+        batch_size: Batch size for prediction to avoid OOM errors.
         
     Returns:
         DataFrame with evaluation results
@@ -307,8 +309,12 @@ def run_evaluation(
         logger.warning("No test data available for evaluation")
         return pd.DataFrame()
 
-    # Instantiate algorithms. All are evaluated through the same manual path so
-    # we always have access to predictions for diversity metrics.
+    n_users = test_in_data.shape[0]
+    n_items = test_in_data.shape[1]
+    logger.info(f"Test data shape: {n_users} users x {n_items} items")
+    logger.info(f"Using batch size: {batch_size} for prediction")
+
+    # Instantiate algorithms.
     algo_instances: Dict[str, Any] = {}
     for algo_name in algorithms:
         if algo_name not in available:
@@ -349,38 +355,115 @@ def run_evaluation(
     if not algo_instances:
         return pd.DataFrame()
 
-    # Evaluate all algorithms manually.
+    # Evaluate all algorithms with batching
     from recpack.metrics import NDCGK, RecallK, PrecisionK, CoverageK
     rows: List[Dict[str, Any]] = []
+    
     for algo_name, algo_instance in algo_instances.items():
         try:
             logger.info(f"Running {algo_name} evaluation...")
-            predictions = _fit_and_predict_algorithm(algo_instance, train_data, test_in_data)
-            diversity = _compute_diversity_at_k(predictions, k_values)
-
-            row: Dict[str, Any] = {'algorithm': algo_name}
+            
+            # 1. Fit algorithm (once on full training data)
+            if hasattr(algo_instance, 'fit'):
+                algo_instance.fit(train_data)
+            elif hasattr(algo_instance, '_fit'):
+                algo_instance._fit(train_data)
+            else:
+                raise AttributeError(f"{algo_instance.__class__.__name__} has no fit/_fit method")
+            
+            # 2. Batched prediction and metric calculation
+            # Initialize accumulators
+            metric_sums = {}
             for k in k_values:
-                ndcg = NDCGK(k)
-                recall = RecallK(k)
-                precision = PrecisionK(k)
-                coverage = CoverageK(k)
-
-                ndcg.calculate(test_out_data, predictions)
-                recall.calculate(test_out_data, predictions)
-                precision.calculate(test_out_data, predictions)
-                coverage.calculate(test_out_data, predictions)
-
-                row[f'NDCGK_{k}'] = ndcg.value
-                row[f'RecallK_{k}'] = recall.value
-                row[f'PrecisionK_{k}'] = precision.value
-                row[f'CoverageK_{k}'] = coverage.value
-                row[f'GiniK_{k}'] = diversity[f'GiniK_{k}']
+                metric_sums[f'NDCGK_{k}'] = 0.0
+                metric_sums[f'RecallK_{k}'] = 0.0
+                metric_sums[f'PrecisionK_{k}'] = 0.0
+                metric_sums[f'CoverageK_{k}'] = 0.0 # Will be recomputed globally
+                # Track exposure for diversity metrics
+                metric_sums[f'exposure_{k}'] = np.zeros(n_items, dtype=np.float64)
+            
+            total_valid_users = 0
+            
+            # Iterate through batches
+            for start_idx in range(0, n_users, batch_size):
+                end_idx = min(start_idx + batch_size, n_users)
+                current_batch_size = end_idx - start_idx
+                
+                # Slice input and output
+                batch_in = test_in_data[start_idx:end_idx]
+                batch_out = test_out_data[start_idx:end_idx]
+                
+                # Skip batch if no active users in test_out (though LastItemPrediction usually ensures this)
+                batch_valid_users = batch_out.getnnz(axis=1).nonzero()[0].size
+                
+                if batch_valid_users == 0:
+                    continue
+                
+                # Predict for batch
+                if hasattr(algo_instance, 'predict'):
+                    batch_pred = algo_instance.predict(batch_in)
+                elif hasattr(algo_instance, '_predict'):
+                    batch_pred = algo_instance._predict(batch_in)
+                else:
+                    raise AttributeError(f"{algo_instance.__class__.__name__} has no predict/_predict method")
+                
+                # Calculate metrics for batch
+                for k in k_values:
+                    # NDCG
+                    ndcg = NDCGK(k)
+                    ndcg.calculate(batch_out, batch_pred)
+                    metric_sums[f'NDCGK_{k}'] += ndcg.value * batch_valid_users
+                    
+                    # Recall
+                    recall = RecallK(k)
+                    recall.calculate(batch_out, batch_pred)
+                    metric_sums[f'RecallK_{k}'] += recall.value * batch_valid_users
+                    
+                    # Precision
+                    precision = PrecisionK(k)
+                    precision.calculate(batch_out, batch_pred)
+                    metric_sums[f'PrecisionK_{k}'] += precision.value * batch_valid_users
+                    
+                    # Exposure (for Diversity)
+                    batch_exposure = _compute_topk_item_exposure(batch_pred, k)
+                    metric_sums[f'exposure_{k}'] += batch_exposure
+                
+                total_valid_users += batch_valid_users
+                
+                # Free memory
+                del batch_pred
+                gc.collect()
+            
+            # 3. Finalize results
+            row: Dict[str, Any] = {'algorithm': algo_name}
+            
+            if total_valid_users > 0:
+                for k in k_values:
+                    # Average metrics
+                    row[f'NDCGK_{k}'] = metric_sums[f'NDCGK_{k}'] / total_valid_users
+                    row[f'RecallK_{k}'] = metric_sums[f'RecallK_{k}'] / total_valid_users
+                    row[f'PrecisionK_{k}'] = metric_sums[f'PrecisionK_{k}'] / total_valid_users
+                    
+                    # Global diversity metrics from accumulated exposure
+                    exposure = metric_sums[f'exposure_{k}']
+                    coverage = 0.0 if n_items == 0 else float(np.count_nonzero(exposure) / n_items)
+                    gini = _gini_from_exposure(exposure)
+                    
+                    row[f'CoverageK_{k}'] = coverage
+                    row[f'GiniK_{k}'] = gini
+            else:
+                logger.warning(f"{algo_name}: No valid test users found.")
+                for k in k_values:
+                    row[f'NDCGK_{k}'] = 0.0
+                    row[f'RecallK_{k}'] = 0.0
+                    row[f'PrecisionK_{k}'] = 0.0
+                    row[f'CoverageK_{k}'] = 0.0
+                    row[f'GiniK_{k}'] = 0.0
 
             rows.append(row)
             log_memory(f"{algo_name} done")
-            del predictions
-            gc.collect()
             logger.info(f"{algo_name} evaluation complete")
+            
         except Exception as e:
             logger.warning(f"Failed to run {algo_name}: {e}")
             import traceback
@@ -599,6 +682,18 @@ def _evaluate_single_cluster(
         log_memory(f"cluster {cluster_id} skipped")
         return cluster_id, None
     
+    # Resume logic: Check if results already exist
+    if output_dir:
+        output_path = Path(output_dir) / f'cluster_{cluster_id}_results.csv'
+        if output_path.exists():
+            logger.info(f"Skipping cluster {cluster_id} - results already exist at {output_path}")
+            try:
+                # Assuming results are saved as CSV
+                results = pd.read_csv(output_path)
+                return cluster_id, results
+            except Exception as e:
+                logger.warning(f"Failed to load existing results for cluster {cluster_id}, re-running: {e}")
+
     # Run pipeline (min_items_per_user filtering happens here)
     pipeline = RecPackPipeline(
         k_values=k_values,
