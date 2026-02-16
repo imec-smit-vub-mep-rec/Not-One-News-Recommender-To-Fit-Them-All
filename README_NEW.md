@@ -254,6 +254,8 @@ Create a JSON configuration file:
 ### Preset Configurations
 
 - `ad`: Large AD dataset exported by Spark (S3 partitioned CSV)
+- `hln`: HLN dataset, same S3 Spark CSV format as ad
+- `vk`: VK dataset, same S3 Spark CSV format as ad
 - `adressa`: Norwegian news dataset (Adressa)
 - `ebnerd`: Danish news dataset (EB-NeRD/Ekstra Bladet)
 
@@ -341,7 +343,11 @@ python scripts/run_full_pipeline.py --dataset ad --config config_ad_s3.json
 ```
 
 ```bash
+# HLN dataset (same S3 layout as ad)
 python scripts/run_full_pipeline.py --dataset hln --config config_hln.json
+
+# VK dataset (same S3 layout as ad)
+python scripts/run_full_pipeline.py --dataset vk --config config_vk.json
 ```
 
 ### Smoke Test Before Full Run (Recommended)

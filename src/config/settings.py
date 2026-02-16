@@ -355,6 +355,41 @@ PRESET_CONFIGS = {
             # Note: is_sso_user is kept as-is, not mapped to is_subscriber to avoid duplicates
         },
     ),
+    # hln and vk use the same S3 Spark CSV structure as ad (article_metadata.csv + impressions/)
+    'hln': DatasetConfig(
+        name='hln',
+        input_path='',
+        format='spark_csv',
+        column_mapping={
+            'ARTICLE_IDENTIFIER': 'article_id',
+            'MAPPED_USER_IDENTIFIER': 'user_id',
+            'START_TIME': 'impression_time',
+            'IMPRESSION_ID': 'impression_id',
+            'TIME_ON_PAGE': 'read_time',
+            'SESSION_ID': 'session_id',
+            'IS_LOGGED_IN': 'is_subscriber',
+            'main_section': 'category_str',
+            'title': 'title',
+        },
+        event_types=['home_page_view', 'article_page_view'],
+    ),
+    'vk': DatasetConfig(
+        name='vk',
+        input_path='',
+        format='spark_csv',
+        column_mapping={
+            'ARTICLE_IDENTIFIER': 'article_id',
+            'MAPPED_USER_IDENTIFIER': 'user_id',
+            'START_TIME': 'impression_time',
+            'IMPRESSION_ID': 'impression_id',
+            'TIME_ON_PAGE': 'read_time',
+            'SESSION_ID': 'session_id',
+            'IS_LOGGED_IN': 'is_subscriber',
+            'main_section': 'category_str',
+            'title': 'title',
+        },
+        event_types=['home_page_view', 'article_page_view'],
+    ),
 }
 
 

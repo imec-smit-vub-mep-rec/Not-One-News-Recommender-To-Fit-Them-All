@@ -76,7 +76,7 @@ def _save_session_embeddings_if_available(articles_df, config: PipelineConfig, s
 
     This keeps evaluation logic local-file based and avoids direct S3 Path.exists checks.
     """
-    if config.dataset.name != "ad":
+    if config.dataset.name not in ("ad", "hln", "vk"):
         return
     if "bert_embedding" not in articles_df.columns:
         logger.info("AD dataset detected but no 'bert_embedding' column found in articles")
@@ -127,7 +127,7 @@ def parse_args():
     parser.add_argument(
         "--dataset",
         type=str,
-        choices=["ad", "adressa", "ebnerd", "custom"],
+        choices=["ad", "adressa", "ebnerd", "hln", "vk", "custom"],
         help="Dataset type (uses preset config)",
     )
     
@@ -248,6 +248,10 @@ def load_or_create_config(args) -> PipelineConfig:
                 if hasattr(config.dataset, target_key):
                     setattr(config.dataset, target_key, value)
                     logger.info(f"Config override: dataset.{target_key} = {value}")
+            # Keep session run_id in sync when dataset name is overridden
+            if 'name' in config_overrides['dataset']:
+                config.session.dataset_name = config.dataset.name
+                config.session.run_id = f"{config.dataset.name}_{config.session.timestamp}"
         if 'clustering' in config_overrides:
             for key, value in config_overrides['clustering'].items():
                 if hasattr(config.clustering, key):
@@ -300,7 +304,8 @@ def run_conversion(config: PipelineConfig, session: Session) -> tuple:
     input_path = config.dataset.input_path
     
     # Select converter
-    if config.dataset.name == "ad":
+    # ad, hln, vk share the same S3 Spark CSV structure (article_metadata.csv + impressions/)
+    if config.dataset.name in ("ad", "hln", "vk") or dataset_format == "spark_csv":
         converter = ADConverter(config=config.dataset)
     elif dataset_format == "jsonl" or config.dataset.name == "adressa":
         converter = AdressaConverter(config=config.dataset)
@@ -814,7 +819,7 @@ def run_clustering(
     logger.info(f"Saved visualizations to {viz_dir}")
     
     # Save cluster profiles Excel to clusters/ directory
-    subscriber_label = "Number of Logged In Users" if config.dataset.name == "ad" else "Number of Subscribers"
+    subscriber_label = "Number of Logged In Users" if config.dataset.name in ("ad", "hln", "vk") else "Number of Subscribers"
 
     save_cluster_profiles_excel(
         features_df=features_df,
