@@ -150,6 +150,10 @@ def _resolve_algorithm_params(
         params.setdefault("max_iter_no_change", 5)
         params.setdefault("stopping_criterion", "ndcg")
         params.setdefault("seed", seed)
+    elif algo_name in ('CB-ST', 'CB-ST-sklearn', 'CB-ST-annoy', 'SentenceTransformerContentBased'):
+        # Map legacy n_trees -> annoy_n_trees (SentenceTransformerContentBased expects annoy_n_trees)
+        if 'n_trees' in params and 'annoy_n_trees' not in params:
+            params['annoy_n_trees'] = params.pop('n_trees')
     return params
 
 

@@ -149,7 +149,7 @@ class EvaluationConfig:
             name='SentenceTransformerContentBased',
             params={
                 'metric': 'angular',
-                'n_trees': 20,
+                'annoy_n_trees': 20,
                 'num_neighbors': 100,
                 'verbose': False,
             }
