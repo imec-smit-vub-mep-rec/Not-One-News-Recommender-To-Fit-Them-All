@@ -834,6 +834,39 @@ class RecPackPipeline:
         return self.preprocessing_info
 
 
+def _sanitize_excel_sheet_name(name: str, max_len: int = 31) -> str:
+    """Sanitize string for use as Excel sheet name (no \\ / * ? : [ ])."""
+    invalid = set('\\/*?:[]')
+    sanitized = ''.join(c if c not in invalid else '_' for c in str(name))
+    return sanitized[:max_len]
+
+
+def _save_topic_report_by_algorithm(
+    topic_reports: List[Dict[str, Any]],
+    cluster_id: int,
+    output_dir: str,
+) -> None:
+    """Save topic report to Excel with one tab per algorithm."""
+    # Group by algorithm
+    by_algo: Dict[str, List[pd.DataFrame]] = {}
+    for tr in topic_reports:
+        algo = tr["algorithm"]
+        df = tr["report_df"].copy()
+        df["cluster_id"] = cluster_id
+        by_algo.setdefault(algo, []).append(df)
+
+    if not by_algo:
+        return
+
+    topic_report_path = Path(output_dir) / f'topic_report_cluster_{cluster_id}.xlsx'
+    with pd.ExcelWriter(topic_report_path, engine='openpyxl') as writer:
+        for algo, dfs in sorted(by_algo.items()):
+            combined = pd.concat(dfs, ignore_index=True)
+            sheet_name = _sanitize_excel_sheet_name(algo)
+            combined.to_excel(writer, sheet_name=sheet_name, index=False)
+    logger.info(f"Saved topic report to {topic_report_path} ({len(by_algo)} tabs)")
+
+
 def _evaluate_single_cluster(
     cluster_id: int,
     cluster_interactions: pd.DataFrame,
@@ -913,17 +946,11 @@ def _evaluate_single_cluster(
             output_path = Path(output_dir) / f'cluster_{cluster_id}_results.csv'
             pipeline.save_results(str(output_path))
 
-            # Save topic report if available
+            # Save topic report if available (one Excel tab per algorithm)
             if pipeline.topic_reports:
-                report_dfs = []
-                for tr in pipeline.topic_reports:
-                    df = tr["report_df"].copy()
-                    df["cluster_id"] = cluster_id
-                    report_dfs.append(df)
-                topic_report_path = Path(output_dir) / f'topic_report_cluster_{cluster_id}.csv'
-                combined = pd.concat(report_dfs, ignore_index=True)
-                save_dataframe(combined, str(topic_report_path), format="csv")
-                logger.info(f"Saved topic report to {topic_report_path}")
+                _save_topic_report_by_algorithm(
+                    pipeline.topic_reports, cluster_id, output_dir
+                )
 
         log_memory(f"cluster {cluster_id} end")
         return cluster_id, cluster_results

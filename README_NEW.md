@@ -543,7 +543,7 @@ runs/
     │   └── cluster_profiles.png
     ├── evaluation_results/   # Per-cluster results
     │   ├── cluster_0_results.csv
-    │   ├── topic_report_cluster_0.csv  # Topic popularity (when articles with categories available)
+    │   ├── topic_report_cluster_0.xlsx  # Topic popularity, one tab per algorithm
     │   └── ...
     └── evaluation_report.txt # Summary report
 ```
