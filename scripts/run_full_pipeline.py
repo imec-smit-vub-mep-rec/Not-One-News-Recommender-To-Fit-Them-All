@@ -144,6 +144,12 @@ def parse_args():
     )
     
     parser.add_argument(
+        "--run-id",
+        type=str,
+        help="Run ID / session directory name (e.g. hln_20260216_130931). Use when --skip-clustering to load clusters from an existing run.",
+    )
+    
+    parser.add_argument(
         "--n-clusters",
         type=int,
         help="Number of clusters (default: auto-detect)",
@@ -274,6 +280,10 @@ def load_or_create_config(args) -> PipelineConfig:
     
     if args.output_dir:
         config.session.base_output_dir = args.output_dir
+    
+    if args.run_id:
+        config.session.run_id = args.run_id
+        logger.info(f"CLI override: session.run_id = {args.run_id}")
     
     if args.n_clusters:
         config.clustering.n_clusters = args.n_clusters

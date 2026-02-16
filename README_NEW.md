@@ -392,10 +392,27 @@ or skip clustering
 python scripts/run_full_pipeline.py --config runs/ad_20260212_160426/config.json --skip-conversion --skip-clustering --content-mode embeddings --verbose
 ```
 
+**Specifying clusters (when using `--skip-clustering`):** The pipeline loads `user_clusters.parquet` from the session directory `runs/<run_id>/`. Use one of:
+
+1. **`--run-id`** – point to an existing run:
+   ```bash
+   python scripts/run_full_pipeline.py --config config_hln.json --run-id hln_20260216_130931 --skip-conversion --skip-clustering --verbose
+   ```
+
+2. **Config from existing run** – use that run’s `config.json` (it contains the run_id):
+   ```bash
+   python scripts/run_full_pipeline.py --config runs/hln_20260216_130931/config.json --skip-conversion --skip-clustering --verbose
+   ```
+
+3. **`session.run_id` in config** – add to your JSON:
+   ```json
+   "session": { "run_id": "hln_20260216_130931" }
+   ```
+
 ```bash
 python scripts/run_full_pipeline.py --config config_hln.json --content-mode embeddings --verbose
 
-python scripts/run_full_pipeline.py --config runs/hln_20260216_110723/config.json --skip-conversion --skip-clustering --content-mode embeddings --verbose
+python scripts/run_full_pipeline.py --config config_hln.json --skip-conversion --skip-clustering --verbose
 ```
 
 Then remove limits for the full run.
