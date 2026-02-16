@@ -15,11 +15,11 @@
     "k_values": [10, 20, 50],
     "content_mode": "embeddings",
     "algorithms": [
-      {"name": "Popularity", "enabled": false},
-      {"name": "ItemKNN", "enabled": false},
-      {"name": "EASE", "enabled": false},
-      {"name": "MultVAE", "enabled": true},
-      {"name": "CB-ST", "enabled": false}
+      {"name": "Popularity", "enabled": true},
+      {"name": "ItemKNN", "enabled": true},
+      {"name": "EASE", "enabled": true},
+      {"name": "MultVAE", "enabled": false},
+      {"name": "CB-ST", "enabled": true}
     ]
   }
 }
