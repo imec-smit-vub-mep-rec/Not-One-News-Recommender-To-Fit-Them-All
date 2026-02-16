@@ -271,6 +271,8 @@ Create a JSON configuration file:
 }
 ```
 
+**Enabling/disabling algorithms:** Add an `algorithms` array under `evaluation`. Each entry needs `name` and `enabled` (true/false). Only algorithms with `enabled: true` are run. Example: set `"enabled": true` for MultVAE to include it (it is disabled by default because it is slower).
+
 ### Preset Configurations
 
 - `ad`: Large AD dataset exported by Spark (S3 partitioned CSV)
