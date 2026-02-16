@@ -8,7 +8,7 @@ from typing import Dict, List, Optional, Any, Tuple
 import pandas as pd
 import numpy as np
 from pathlib import Path
-from scipy.sparse import issparse
+from scipy.sparse import issparse, csr_matrix
 import gc
 
 from ..utils.logging import get_logger, log_memory
@@ -23,7 +23,7 @@ try:
     from recpack.preprocessing.preprocessors import DataFramePreprocessor
     from recpack.preprocessing.filters import MinItemsPerUser, MinUsersPerItem
     from recpack.scenarios import LastItemPrediction
-    from recpack.algorithms import Popularity, ItemKNN, EASE
+    from recpack.algorithms import Popularity, ItemKNN, EASE, MultVAE
     from recpack.matrix import InteractionMatrix
     HAS_RECPACK = True
 except ImportError:
@@ -37,6 +37,116 @@ def check_recpack_available():
         raise ImportError(
             "RecPack is not installed. Install with: pip install recpack"
         )
+
+
+def _to_csr_matrix(data: Any) -> Optional[csr_matrix]:
+    """Convert InteractionMatrix / sparse / dense inputs to CSR matrix."""
+    if data is None:
+        return None
+
+    values = data.values if hasattr(data, "values") else data
+    if values is None:
+        return None
+
+    if issparse(values):
+        return values.tocsr()
+
+    return csr_matrix(np.asarray(values))
+
+
+def _normalize_validation_tuple(candidate: Any) -> Optional[Tuple[csr_matrix, csr_matrix]]:
+    """Normalize validation tuple to CSR matrices."""
+    if not isinstance(candidate, tuple) or len(candidate) != 2:
+        return None
+
+    val_in = _to_csr_matrix(candidate[0])
+    val_out = _to_csr_matrix(candidate[1])
+    if val_in is None or val_out is None or val_out.nnz == 0:
+        return None
+    return val_in, val_out
+
+
+def _build_validation_from_train(train_data: Any) -> Optional[Tuple[csr_matrix, csr_matrix]]:
+    """Build a fallback validation split by holding out one item per eligible user."""
+    train_csr = _to_csr_matrix(train_data)
+    if train_csr is None:
+        return None
+
+    n_users, n_items = train_csr.shape
+    in_rows: List[int] = []
+    in_cols: List[int] = []
+    in_vals: List[float] = []
+    out_rows: List[int] = []
+    out_cols: List[int] = []
+    out_vals: List[float] = []
+
+    for user_idx in range(n_users):
+        start = train_csr.indptr[user_idx]
+        end = train_csr.indptr[user_idx + 1]
+        if end - start < 2:
+            continue
+
+        user_items = train_csr.indices[start:end]
+        user_vals = train_csr.data[start:end]
+
+        holdout_item = int(user_items[-1])
+        holdout_val = float(user_vals[-1])
+        out_rows.append(user_idx)
+        out_cols.append(holdout_item)
+        out_vals.append(holdout_val)
+
+        hist_items = user_items[:-1]
+        hist_vals = user_vals[:-1]
+        if hist_items.size > 0:
+            in_rows.extend([user_idx] * int(hist_items.size))
+            in_cols.extend(hist_items.tolist())
+            in_vals.extend(hist_vals.astype(np.float64).tolist())
+
+    if not out_rows:
+        return None
+
+    val_in = csr_matrix((in_vals, (in_rows, in_cols)), shape=(n_users, n_items), dtype=np.float64)
+    val_out = csr_matrix((out_vals, (out_rows, out_cols)), shape=(n_users, n_items), dtype=np.float64)
+    if val_out.nnz == 0:
+        return None
+    return val_in, val_out
+
+
+def _extract_validation_data(scenario: Any, train_data: Any) -> Optional[Tuple[csr_matrix, csr_matrix]]:
+    """Extract validation data from scenario with fallback construction."""
+    for attr_name in ("validation_data", "validation_set"):
+        if hasattr(scenario, attr_name):
+            normalized = _normalize_validation_tuple(getattr(scenario, attr_name))
+            if normalized is not None:
+                return normalized
+
+    if hasattr(scenario, "validation_in") and hasattr(scenario, "validation_out"):
+        normalized = _normalize_validation_tuple(
+            (getattr(scenario, "validation_in"), getattr(scenario, "validation_out"))
+        )
+        if normalized is not None:
+            return normalized
+
+    logger.warning("Validation data not exposed by scenario; falling back to local holdout split")
+    return _build_validation_from_train(train_data)
+
+
+def _resolve_algorithm_params(
+    algo_name: str,
+    algorithm_params: Dict[str, Dict[str, Any]],
+    k_values: List[int],
+    seed: int,
+) -> Dict[str, Any]:
+    """Resolve algorithm params with MultVAE-safe defaults."""
+    params = dict(algorithm_params.get(algo_name, {}))
+    if algo_name == "MultVAE":
+        if k_values:
+            params.setdefault("predict_topK", int(max(k_values)))
+        params.setdefault("stop_early", True)
+        params.setdefault("max_iter_no_change", 5)
+        params.setdefault("stopping_criterion", "ndcg")
+        params.setdefault("seed", seed)
+    return params
 
 
 def _compute_topk_item_exposure(predictions: Any, k: int) -> np.ndarray:
@@ -219,6 +329,7 @@ def get_available_algorithms(include_content_based: bool = True) -> Dict[str, An
         'Popularity': Popularity,
         'ItemKNN': ItemKNN,
         'EASE': EASE,
+        'MultVAE': MultVAE,
     }
     
     if include_content_based:
@@ -237,6 +348,7 @@ def get_available_algorithms(include_content_based: bool = True) -> Dict[str, An
 def run_evaluation(
     interaction_matrix: Any,
     algorithms: Optional[List[str]] = None,
+    algorithm_params: Optional[Dict[str, Dict[str, Any]]] = None,
     k_values: List[int] = [10, 20, 50],
     validation_split: float = 0.1,  # Deprecated: not used with LastItemPrediction
     test_split: float = 0.1,  # Deprecated: not used with LastItemPrediction
@@ -257,6 +369,7 @@ def run_evaluation(
         interaction_matrix: RecPack InteractionMatrix
         algorithms: List of algorithm names (None = all available)
         k_values: List of k values for metrics
+        algorithm_params: Per-algorithm constructor kwargs
         validation_split: DEPRECATED - not used with LastItemPrediction
         test_split: DEPRECATED - not used with LastItemPrediction
         seed: Random seed
@@ -271,6 +384,7 @@ def run_evaluation(
         DataFrame with evaluation results
     """
     check_recpack_available()
+    algorithm_params = algorithm_params or {}
     
     available = get_available_algorithms(
         include_content_based=(content_df is not None or embeddings_df is not None)
@@ -304,6 +418,7 @@ def run_evaluation(
     train_data = train_matrix.values
     test_in_data = test_in.values
     test_out_data = test_out.values
+    validation_data = _extract_validation_data(scenario, train_data)
 
     if test_out_data is None or test_out_data.nnz == 0:
         logger.warning("No test data available for evaluation")
@@ -322,35 +437,39 @@ def run_evaluation(
             continue
         
         algo_class = available[algo_name]
+        params = _resolve_algorithm_params(algo_name, algorithm_params, k_values, seed)
         
         if algo_name in ('CB-ST', 'CB-ST-sklearn', 'CB-ST-annoy', 'SentenceTransformerContentBased'):
             # Content-based algorithm needs content/item mapping and optional embeddings.
             if (content_df is not None or embeddings_df is not None) and item_mapping is not None:
                 if algo_name == 'CB-ST-sklearn':
-                    backend = 'sklearn'
                     display_name = 'CB-ST-sklearn'
+                    params.setdefault('backend', 'sklearn')
                 elif algo_name == 'CB-ST-annoy':
-                    backend = 'annoy'
                     display_name = 'CB-ST-annoy'
+                    params.setdefault('backend', 'annoy')
                 else:
-                    backend = 'annoy'  # Default to annoy (faster)
                     display_name = 'CB-ST'
+                    params.setdefault('backend', 'annoy')  # Default to annoy (faster)
                 
                 algo_instances[display_name] = algo_class(
                     content=content_df if content_df is not None else {},
                     item_mapping=item_mapping,
-                    backend=backend,
                     embeddings=embeddings_df,
                     embedding_column=embedding_column,
+                    **params,
                 )
                 if embeddings_df is not None:
-                    logger.info(f"Created {display_name} with {backend} backend (using pre-calculated embeddings)")
+                    logger.info(
+                        f"Created {display_name} with {params.get('backend')} backend "
+                        "(using pre-calculated embeddings)"
+                    )
                 else:
-                    logger.info(f"Created {display_name} with {backend} backend")
+                    logger.info(f"Created {display_name} with {params.get('backend')} backend")
             else:
                 logger.warning("Content-based algorithm requires content_df and item_mapping")
         else:
-            algo_instances[algo_name] = algo_class()
+            algo_instances[algo_name] = algo_class(**params)
 
     if not algo_instances:
         return pd.DataFrame()
@@ -364,8 +483,24 @@ def run_evaluation(
             logger.info(f"Running {algo_name} evaluation...")
             
             # 1. Fit algorithm (once on full training data)
+            requires_validation = (
+                algo_name == "MultVAE" or algo_instance.__class__.__name__ == "MultVAE"
+            )
             if hasattr(algo_instance, 'fit'):
-                algo_instance.fit(train_data)
+                if requires_validation:
+                    if validation_data is None:
+                        logger.warning(
+                            "Skipping %s: validation_data could not be prepared for fit()",
+                            algo_name,
+                        )
+                        continue
+                    try:
+                        algo_instance.fit(train_data, validation_data=validation_data)
+                    except TypeError:
+                        # Support versions expecting positional validation tuple.
+                        algo_instance.fit(train_data, validation_data)
+                else:
+                    algo_instance.fit(train_data)
             elif hasattr(algo_instance, '_fit'):
                 algo_instance._fit(train_data)
             else:
@@ -588,11 +723,13 @@ class RecPackPipeline:
     def run(
         self,
         algorithms: Optional[List[str]] = None,
+        algorithm_params: Optional[Dict[str, Dict[str, Any]]] = None,
     ) -> pd.DataFrame:
         """Run evaluation.
         
         Args:
             algorithms: List of algorithm names (None = all)
+            algorithm_params: Per-algorithm constructor kwargs
             
         Returns:
             DataFrame with results
@@ -605,6 +742,7 @@ class RecPackPipeline:
         self.results = run_evaluation(
             self.interaction_matrix,
             algorithms=algorithms,
+            algorithm_params=algorithm_params,
             k_values=self.k_values,
             validation_split=self.validation_split,
             test_split=self.test_split,
@@ -651,6 +789,7 @@ def _evaluate_single_cluster(
     cluster_interactions: pd.DataFrame,
     content_df: Optional[pd.DataFrame],
     algorithms: Optional[List[str]],
+    algorithm_params: Optional[Dict[str, Dict[str, Any]]],
     k_values: List[int],
     min_items_per_user: int,
     output_dir: Optional[str],
@@ -664,6 +803,7 @@ def _evaluate_single_cluster(
         cluster_interactions: Interactions for this cluster
         content_df: Optional content DataFrame
         algorithms: List of algorithm names
+        algorithm_params: Per-algorithm constructor kwargs
         k_values: List of k values for metrics
         min_items_per_user: Minimum items per user for RecPack filter
         output_dir: Optional directory to save results
@@ -708,7 +848,10 @@ def _evaluate_single_cluster(
             content_df=content_df,
         )
         
-        cluster_results = pipeline.run(algorithms=algorithms)
+        cluster_results = pipeline.run(
+            algorithms=algorithms,
+            algorithm_params=algorithm_params,
+        )
         
         # Save if output dir provided
         if output_dir:
@@ -730,6 +873,7 @@ def run_cluster_evaluation(
     users_df: pd.DataFrame,
     content_df: Optional[pd.DataFrame] = None,
     algorithms: Optional[List[str]] = None,
+    algorithm_params: Optional[Dict[str, Dict[str, Any]]] = None,
     k_values: List[int] = [10, 20, 50],
     min_items_per_user: int = 5,
     output_dir: Optional[str] = None,
@@ -750,6 +894,7 @@ def run_cluster_evaluation(
                   which includes ALL users)
         content_df: Optional content DataFrame
         algorithms: List of algorithm names
+        algorithm_params: Per-algorithm constructor kwargs
         k_values: List of k values for metrics
         min_items_per_user: Minimum items per user for RecPack filter (default: 5).
                             Users with fewer interactions are excluded from evaluation
@@ -796,7 +941,7 @@ def run_cluster_evaluation(
         for cluster_id, cluster_interactions in cluster_data.items():
             results_list.append(_evaluate_single_cluster(
                 cluster_id, cluster_interactions, content_df,
-                algorithms, k_values, min_items_per_user, output_dir,
+                algorithms, algorithm_params, k_values, min_items_per_user, output_dir,
                 embeddings_df, embedding_column
             ))
             gc.collect()
@@ -807,7 +952,7 @@ def run_cluster_evaluation(
         results_list = Parallel(n_jobs=n_jobs)(
             delayed(_evaluate_single_cluster)(
                 cluster_id, cluster_interactions, content_df,
-                algorithms, k_values, min_items_per_user, output_dir,
+                algorithms, algorithm_params, k_values, min_items_per_user, output_dir,
                 embeddings_df, embedding_column
             )
             for cluster_id, cluster_interactions in cluster_data.items()

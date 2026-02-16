@@ -132,6 +132,20 @@ class EvaluationConfig:
             grid={'l2': [1, 10, 100, 1000]}
         ),
         AlgorithmConfig(
+            name='MultVAE',
+            enabled=False,
+            params={
+                'batch_size': 500,
+                'max_epochs': 200,
+                'learning_rate': 0.0001,
+                'dim_bottleneck_layer': 200,
+                'dim_hidden_layer': 600,
+                'max_beta': 0.2,
+                'anneal_steps': 200000,
+                'dropout': 0.5,
+            }
+        ),
+        AlgorithmConfig(
             name='SentenceTransformerContentBased',
             params={
                 'metric': 'angular',

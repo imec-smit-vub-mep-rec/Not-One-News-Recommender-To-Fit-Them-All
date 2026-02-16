@@ -7,7 +7,7 @@ A modular framework for user clustering and recommendation evaluation in news re
 This project provides tools for:
 1. **Data Conversion** - Converting various dataset formats (Adressa, EB-NeRD) to a standard format
 2. **User Clustering** - Clustering users based on behavioral features (categories, time patterns, activity)
-3. **Recommendation Evaluation** - Evaluating recommendation algorithms (Popularity, ItemKNN, EASE, Content-based) using RecPack
+3. **Recommendation Evaluation** - Evaluating recommendation algorithms (Popularity, ItemKNN, EASE, MultVAE, Content-based) using RecPack
 
 ## Installation
 
@@ -245,7 +245,27 @@ Create a JSON configuration file:
     "min_impressions_per_user": 5
   },
   "evaluation": {
-    "algorithms": ["Popularity", "ItemKNN", "EASE", "CB-ST"],
+    "algorithms": [
+      {"name": "Popularity", "enabled": true},
+      {"name": "ItemKNN", "enabled": true},
+      {"name": "EASE", "enabled": true},
+      {
+        "name": "MultVAE",
+        "enabled": false,
+        "params": {
+          "batch_size": 500,
+          "max_epochs": 200,
+          "learning_rate": 0.0001,
+          "dim_bottleneck_layer": 200,
+          "dim_hidden_layer": 600,
+          "max_beta": 0.2,
+          "anneal_steps": 200000,
+          "dropout": 0.5,
+          "validation_sample_size": 20000
+        }
+      },
+      {"name": "CB-ST", "enabled": true}
+    ],
     "k_values": [10, 20, 50]
   }
 }
@@ -344,7 +364,7 @@ python scripts/run_full_pipeline.py --dataset ad --config config_ad_s3.json
 
 ```bash
 # HLN dataset (same S3 layout as ad)
-python scripts/run_full_pipeline.py --dataset hln --config config_hln.json
+python scripts/run_full_pipeline.py --dataset hln --config config_hln.json --skip-evaluation
 
 # VK dataset (same S3 layout as ad)
 python scripts/run_full_pipeline.py --dataset vk --config config_vk.json
@@ -399,6 +419,18 @@ aws s3 sync runs/ s3://<bucket>/<results-prefix>/runs/
 - **Popularity**: Recommends most popular items
 - **ItemKNN**: Item-based k-nearest neighbors
 - **EASE**: Embarrassingly Shallow Autoencoders
+- **MultVAE**: Variational autoencoder for collaborative filtering (RecPack implementation)
+
+#### MultVAE notes
+
+- `MultVAE` uses RecPack's `fit(X, validation_data=(validation_in, validation_out))` API.
+- In this pipeline, sensible defaults are applied if not provided in config:
+  - `predict_topK = max(k_values)`
+  - `stop_early = true`
+  - `max_iter_no_change = 5`
+  - `stopping_criterion = "ndcg"`
+  - `seed = evaluation seed`
+- Override any of these in `evaluation.algorithms[].params`.
 
 ### Content-Based
 - **CB-ST**: Sentence Transformer embeddings with Annoy approximate nearest neighbors

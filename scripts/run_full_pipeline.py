@@ -924,12 +924,18 @@ def run_evaluation(
     
     # Extract algorithm names from AlgorithmConfig objects
     algorithm_names = [algo.name for algo in config.evaluation.algorithms if algo.enabled]
+    algorithm_params = {
+        algo.name: dict(algo.params)
+        for algo in config.evaluation.algorithms
+        if algo.enabled and getattr(algo, "params", None)
+    }
     
     results = run_cluster_evaluation(
         interactions_df=interactions_df,
         users_df=users_df,
         content_df=content_df,
         algorithms=algorithm_names,
+        algorithm_params=algorithm_params,
         k_values=config.evaluation.k_values,
         min_items_per_user=config.clustering.min_impressions_per_user,  # Filter only at evaluation
         output_dir=results_dir,
