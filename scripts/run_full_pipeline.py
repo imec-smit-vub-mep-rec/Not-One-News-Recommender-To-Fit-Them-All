@@ -919,6 +919,15 @@ def run_evaluation(
         logger.info(f"No pre-calculated embeddings found at {embeddings_path}")
         logger.info("CB-ST is not enabled, continuing without embeddings")
     
+    # Load articles for topic-level diversity metrics (CoverageK_topics, GiniK_topics)
+    articles_df = None
+    articles_cleaned_path = session.get_path("articles_cleaned.parquet")
+    if Path(articles_cleaned_path).exists():
+        articles_df = load_dataframe(articles_cleaned_path)
+        logger.info(f"Loaded {len(articles_df)} articles for topic diversity metrics")
+    else:
+        logger.info("No articles_cleaned.parquet found; topic-level diversity metrics will be skipped")
+
     # Run evaluation per cluster
     results_dir = session.get_path("evaluation_results")
     
@@ -934,6 +943,7 @@ def run_evaluation(
         interactions_df=interactions_df,
         users_df=users_df,
         content_df=content_df,
+        articles_df=articles_df,
         algorithms=algorithm_names,
         algorithm_params=algorithm_params,
         k_values=config.evaluation.k_values,

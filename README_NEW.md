@@ -486,10 +486,16 @@ For each configured value in `evaluation.k_values`, the pipeline reports:
 - `NDCGK_<k>`, `RecallK_<k>`, `PrecisionK_<k>`: ranking quality at cutoff `k`
 - `CoverageK_<k>`: catalog coverage at `k`, computed as unique recommended items divided by total available items
 - `GiniK_<k>`: inequality of item exposure at `k`, computed from recommendation frequency across items
+- `CoverageK_topics_<k>`, `GiniK_topics_<k>`: topic-level diversity (when `articles_cleaned.parquet` with `categories` is available)
+  - Uses the `categories` column (array of strings); falls back to `category_str` if missing
+  - Multi-topic items split exposure across all their categories
+  - Unknown items (no valid categories) are excluded from topic metrics
 
 Interpretation:
 - Higher `CoverageK_<k>` means recommendations are spread over more of the catalog
 - Lower `GiniK_<k>` means item exposure is more evenly distributed (less concentration on a few items)
+- `CoverageK_topics_<k>`: fraction of topics (categories) that receive at least one recommendation
+- `GiniK_topics_<k>`: inequality of topic exposure (lower = more even spread across topics)
 
 ### Data Filtering (Legacy Parity)
 
@@ -533,6 +539,7 @@ runs/
     │   └── cluster_profiles.png
     ├── evaluation_results/   # Per-cluster results
     │   ├── cluster_0_results.csv
+    │   ├── topic_report_cluster_0.csv  # Topic popularity (when articles with categories available)
     │   └── ...
     └── evaluation_report.txt # Summary report
 ```

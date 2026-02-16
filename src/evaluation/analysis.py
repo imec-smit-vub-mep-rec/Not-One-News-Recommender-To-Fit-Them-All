@@ -409,6 +409,8 @@ class ResultsAnalyzer:
             'RecallK_20',
             'CoverageK_10',
             'GiniK_10',
+            'CoverageK_topics_10',
+            'GiniK_topics_10',
         ],
     ) -> str:
         """Generate a text report of results.
@@ -419,6 +421,10 @@ class ResultsAnalyzer:
         Returns:
             Report string
         """
+        if self.combined_df is None:
+            self.aggregate()
+        # Only include metrics that exist in results (e.g. topic metrics when articles_df provided)
+        metrics = [m for m in metrics if m in self.combined_df.columns]
         lines = [
             "=" * 60,
             "EVALUATION RESULTS REPORT",

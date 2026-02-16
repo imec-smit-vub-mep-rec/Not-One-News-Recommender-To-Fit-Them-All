@@ -94,7 +94,7 @@ def test_run_evaluation_passes_multvae_params_and_validation_tuple(monkeypatch):
         lambda include_content_based=True: {"MultVAE": _FakeMultVAE},
     )
 
-    results = rp.run_evaluation(
+    results, _ = rp.run_evaluation(
         interaction_matrix=_MatrixWrapper(train),
         algorithms=["MultVAE"],
         algorithm_params={"MultVAE": {"batch_size": 256, "predict_topK": 3}},
@@ -147,7 +147,7 @@ def test_multvae_uses_fallback_validation_when_scenario_has_none(monkeypatch):
         lambda include_content_based=True: {"MultVAE": _FakeMultVAE},
     )
 
-    results = rp.run_evaluation(
+    results, _ = rp.run_evaluation(
         interaction_matrix=_MatrixWrapper(train),
         algorithms=["MultVAE"],
         k_values=[10],

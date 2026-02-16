@@ -4,7 +4,7 @@ RecPack evaluation pipeline.
 Provides a unified interface for running recommendation algorithm evaluations.
 """
 
-from typing import Dict, List, Optional, Any, Tuple
+from typing import Dict, List, Optional, Any, Tuple, Set
 import pandas as pd
 import numpy as np
 from pathlib import Path
@@ -13,7 +13,11 @@ import gc
 
 from ..utils.logging import get_logger, log_memory
 from ..utils.io import load_dataframe, save_dataframe, ensure_dir
-
+from .topic_diversity import (
+    _normalize_categories,
+    compute_topic_diversity,
+    build_topic_report,
+)
 
 logger = get_logger("evaluation.recpack_pipeline")
 
@@ -358,7 +362,8 @@ def run_evaluation(
     embeddings_df: Optional[pd.DataFrame] = None,
     embedding_column: str = 'embedding',
     batch_size: int = 10000,
-) -> pd.DataFrame:
+    articles_df: Optional[pd.DataFrame] = None,
+) -> Tuple[pd.DataFrame, List[Dict[str, Any]]]:
     """Run evaluation for multiple algorithms using LastItemPrediction scenario.
     
     Uses LastItemPrediction scenario (matching legacy behavior) where each user's
@@ -379,9 +384,11 @@ def run_evaluation(
                        If provided, CB-ST will use these instead of encoding content.
         embedding_column: Column name in embeddings_df containing the embedding vectors.
         batch_size: Batch size for prediction to avoid OOM errors.
+        articles_df: Optional articles DataFrame with article_id and categories for topic-level metrics.
         
     Returns:
-        DataFrame with evaluation results
+        Tuple of (results DataFrame, topic_reports list).
+        topic_reports: List of dicts with keys algorithm, k, report_df (DataFrame with topic popularity).
     """
     check_recpack_available()
     algorithm_params = algorithm_params or {}
@@ -409,7 +416,7 @@ def run_evaluation(
     except (ZeroDivisionError, ValueError) as e:
         logger.warning(f"Failed to create scenario split (likely insufficient data): {e}")
         logger.warning("Returning empty results for this subset")
-        return pd.DataFrame()
+        return pd.DataFrame(), []
     
     # Get train and test data from scenario.
     train_matrix = scenario.full_training_data
@@ -422,7 +429,7 @@ def run_evaluation(
 
     if test_out_data is None or test_out_data.nnz == 0:
         logger.warning("No test data available for evaluation")
-        return pd.DataFrame()
+        return pd.DataFrame(), []
 
     n_users = test_in_data.shape[0]
     n_items = test_in_data.shape[1]
@@ -472,11 +479,23 @@ def run_evaluation(
             algo_instances[algo_name] = algo_class(**params)
 
     if not algo_instances:
-        return pd.DataFrame()
+        return pd.DataFrame(), []
+
+    # Build topic mapping for topic-level diversity metrics
+    internal_id_to_categories: Dict[int, List[str]] = {}
+    all_topics: Set[str] = set()
+    if articles_df is not None and item_mapping is not None:
+        internal_id_to_categories, all_topics = _normalize_categories(articles_df, item_mapping)
+        if all_topics:
+            logger.info(
+                f"Topic diversity: {len(all_topics)} topics, "
+                f"{len(internal_id_to_categories)} items with categories"
+            )
 
     # Evaluate all algorithms with batching
     from recpack.metrics import NDCGK, RecallK, PrecisionK, CoverageK
     rows: List[Dict[str, Any]] = []
+    topic_reports: List[Dict[str, Any]] = []
     
     for algo_name, algo_instance in algo_instances.items():
         try:
@@ -586,6 +605,21 @@ def run_evaluation(
                     
                     row[f'CoverageK_{k}'] = coverage
                     row[f'GiniK_{k}'] = gini
+
+                    # Topic-level diversity metrics
+                    if internal_id_to_categories and all_topics:
+                        topic_coverage, topic_gini, topic_exposure = compute_topic_diversity(
+                            exposure, internal_id_to_categories, all_topics, k
+                        )
+                        row[f'CoverageK_topics_{k}'] = topic_coverage
+                        row[f'GiniK_topics_{k}'] = topic_gini
+                        report_df = build_topic_report(
+                            topic_exposure, all_topics, algorithm=algo_name, k=k
+                        )
+                        topic_reports.append({"algorithm": algo_name, "k": k, "report_df": report_df})
+                    else:
+                        row[f'CoverageK_topics_{k}'] = 0.0
+                        row[f'GiniK_topics_{k}'] = 0.0
             else:
                 logger.warning(f"{algo_name}: No valid test users found.")
                 for k in k_values:
@@ -594,6 +628,8 @@ def run_evaluation(
                     row[f'PrecisionK_{k}'] = 0.0
                     row[f'CoverageK_{k}'] = 0.0
                     row[f'GiniK_{k}'] = 0.0
+                    row[f'CoverageK_topics_{k}'] = 0.0
+                    row[f'GiniK_topics_{k}'] = 0.0
 
             rows.append(row)
             log_memory(f"{algo_name} done")
@@ -604,7 +640,7 @@ def run_evaluation(
             import traceback
             logger.debug(traceback.format_exc())
 
-    return pd.DataFrame(rows) if rows else pd.DataFrame()
+    return (pd.DataFrame(rows) if rows else pd.DataFrame()), topic_reports
 
 
 class RecPackPipeline:
@@ -624,6 +660,7 @@ class RecPackPipeline:
         seed: int = 42,
         embeddings_df: Optional[pd.DataFrame] = None,
         embedding_column: str = 'embedding',
+        articles_df: Optional[pd.DataFrame] = None,
     ):
         """Initialize the pipeline.
         
@@ -636,6 +673,7 @@ class RecPackPipeline:
             seed: Random seed
             embeddings_df: Optional DataFrame with pre-calculated embeddings
             embedding_column: Column name in embeddings_df containing embeddings
+            articles_df: Optional articles DataFrame for topic-level diversity metrics
         """
         check_recpack_available()
         
@@ -647,11 +685,13 @@ class RecPackPipeline:
         self.seed = seed
         self.embeddings_df = embeddings_df
         self.embedding_column = embedding_column
+        self.articles_df = articles_df
         
         self.interaction_matrix: Optional[Any] = None
         self.preprocessing_info: Optional[Dict] = None
         self.content_df: Optional[pd.DataFrame] = None
         self.results: Optional[pd.DataFrame] = None
+        self.topic_reports: List[Dict[str, Any]] = []
     
     def load_data(
         self,
@@ -698,11 +738,12 @@ class RecPackPipeline:
         self,
         interactions_df: pd.DataFrame,
         content_df: Optional[pd.DataFrame] = None,
+        articles_df: Optional[pd.DataFrame] = None,
         user_col: str = 'user_id',
         item_col: str = 'article_id',
         time_col: str = 'impression_time',
     ) -> 'RecPackPipeline':
-        """Load interaction and optional content data directly from DataFrames."""
+        """Load interaction and optional content/articles data directly from DataFrames."""
         logger.info(f"Loaded {len(interactions_df)} interactions (in-memory)")
 
         self.interaction_matrix, self.preprocessing_info = create_interaction_matrix(
@@ -717,6 +758,10 @@ class RecPackPipeline:
         self.content_df = content_df
         if self.content_df is not None:
             logger.info(f"Loaded content for {len(self.content_df)} items (in-memory)")
+
+        self.articles_df = articles_df if articles_df is not None else self.articles_df
+        if self.articles_df is not None:
+            logger.info(f"Loaded articles for topic diversity: {len(self.articles_df)} articles")
 
         return self
     
@@ -739,7 +784,7 @@ class RecPackPipeline:
         
         item_mapping = self.preprocessing_info.get('item_mapping')
         
-        self.results = run_evaluation(
+        self.results, self.topic_reports = run_evaluation(
             self.interaction_matrix,
             algorithms=algorithms,
             algorithm_params=algorithm_params,
@@ -751,6 +796,7 @@ class RecPackPipeline:
             item_mapping=item_mapping,
             embeddings_df=self.embeddings_df,
             embedding_column=self.embedding_column,
+            articles_df=self.articles_df,
         )
         
         return self.results
@@ -795,6 +841,7 @@ def _evaluate_single_cluster(
     output_dir: Optional[str],
     embeddings_df: Optional[pd.DataFrame] = None,
     embedding_column: str = 'embedding',
+    articles_df: Optional[pd.DataFrame] = None,
 ) -> Tuple[int, Optional[pd.DataFrame]]:
     """Evaluate a single cluster. Helper for parallel execution.
     
@@ -809,6 +856,7 @@ def _evaluate_single_cluster(
         output_dir: Optional directory to save results
         embeddings_df: Optional DataFrame with pre-calculated embeddings
         embedding_column: Column name containing embeddings
+        articles_df: Optional articles DataFrame for topic-level diversity metrics
         
     Returns:
         Tuple of (cluster_id, results DataFrame or None if skipped)
@@ -840,12 +888,14 @@ def _evaluate_single_cluster(
         min_items_per_user=min_items_per_user,
         embeddings_df=embeddings_df,
         embedding_column=embedding_column,
+        articles_df=articles_df,
     )
     
     try:
         pipeline.load_data_from_dataframes(
             interactions_df=cluster_interactions,
             content_df=content_df,
+            articles_df=articles_df,
         )
         
         cluster_results = pipeline.run(
@@ -858,6 +908,18 @@ def _evaluate_single_cluster(
             ensure_dir(output_dir)
             output_path = Path(output_dir) / f'cluster_{cluster_id}_results.csv'
             pipeline.save_results(str(output_path))
+
+            # Save topic report if available
+            if pipeline.topic_reports:
+                report_dfs = []
+                for tr in pipeline.topic_reports:
+                    df = tr["report_df"].copy()
+                    df["cluster_id"] = cluster_id
+                    report_dfs.append(df)
+                topic_report_path = Path(output_dir) / f'topic_report_cluster_{cluster_id}.csv'
+                combined = pd.concat(report_dfs, ignore_index=True)
+                save_dataframe(combined, str(topic_report_path), format="csv")
+                logger.info(f"Saved topic report to {topic_report_path}")
 
         log_memory(f"cluster {cluster_id} end")
         return cluster_id, cluster_results
@@ -872,6 +934,7 @@ def run_cluster_evaluation(
     interactions_df: pd.DataFrame,
     users_df: pd.DataFrame,
     content_df: Optional[pd.DataFrame] = None,
+    articles_df: Optional[pd.DataFrame] = None,
     algorithms: Optional[List[str]] = None,
     algorithm_params: Optional[Dict[str, Dict[str, Any]]] = None,
     k_values: List[int] = [10, 20, 50],
@@ -893,6 +956,7 @@ def run_cluster_evaluation(
         users_df: DataFrame with user_id and cluster_id columns (from clustering,
                   which includes ALL users)
         content_df: Optional content DataFrame
+        articles_df: Optional articles DataFrame for topic-level diversity metrics
         algorithms: List of algorithm names
         algorithm_params: Per-algorithm constructor kwargs
         k_values: List of k values for metrics
@@ -942,7 +1006,7 @@ def run_cluster_evaluation(
             results_list.append(_evaluate_single_cluster(
                 cluster_id, cluster_interactions, content_df,
                 algorithms, algorithm_params, k_values, min_items_per_user, output_dir,
-                embeddings_df, embedding_column
+                embeddings_df, embedding_column, articles_df
             ))
             gc.collect()
             log_memory("between clusters")
@@ -953,7 +1017,7 @@ def run_cluster_evaluation(
             delayed(_evaluate_single_cluster)(
                 cluster_id, cluster_interactions, content_df,
                 algorithms, algorithm_params, k_values, min_items_per_user, output_dir,
-                embeddings_df, embedding_column
+                embeddings_df, embedding_column, articles_df
             )
             for cluster_id, cluster_interactions in cluster_data.items()
         )
