@@ -133,7 +133,7 @@ class EvaluationConfig:
         ),
         AlgorithmConfig(
             name='MultVAE',
-            enabled=False,
+            enabled=True,
             params={
                 'batch_size': 500,
                 'max_epochs': 200,
