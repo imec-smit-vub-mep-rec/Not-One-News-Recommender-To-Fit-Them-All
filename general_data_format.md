@@ -55,7 +55,7 @@
 | proportion_night_reading_time     | number    | Proportion of reading time during night hours(all reading time during night hours / total reading time)         |
 | avg_reading_time                  | number    | Average reading time in seconds                                                                                 |
 | avg_session_length                | number    | Average session length in number of impressions                                                                 |
-| avg_session_duration              | number    | Average session duration in seconds                                                                             |
+| avg_session_duration              | number    | Average total read_time per session (sum of read_time across impressions). Differs from legacy timestamp-span definition. |
 | avg_categories_per_session        | number    | Average number of categories per session                                                                        |
 | avg_category_switches_per_session | number    | Average number of category switches per session                                                                 |
 | avg_reading_time_homepage         | number    | Average reading time in seconds on homepage                                                                     |
@@ -118,6 +118,7 @@
 | avg_reading_time                  | number    | Average reading time in seconds for users in the cluster                                                    |
 | avg_scroll_depth                  | number    | Average scroll percentage for users in the cluster                                                          |
 | avg_session_length_articles       | number    | Average number of articles per session in the cluster                                                       |
+| avg_impressions_per_session      | number    | Average number of impressions per session (includes homepage views)                                         |
 | avg_categories_per_session        | number    | Average number of categories per session in the cluster                                                     |
 | avg_category_switches_per_session | number    | Average number of category switches per session in the cluster                                              |
 | avg_session_duration_seconds      | number    | Average session duration in seconds for the cluster                                                         |

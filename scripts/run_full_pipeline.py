@@ -474,6 +474,7 @@ def _compute_cluster_summary(
         sub_per_user = sub_per_user.reindex(user_cluster.index, fill_value=0)
         sub_counts = sub_per_user.groupby(user_cluster).sum()
     else:
+        sub_per_user = pd.Series(0, index=user_cluster.index, dtype=int)
         sub_counts = pd.Series(0, index=cluster_sizes.index)
 
     # --- Per-user metrics (then average per cluster) --------------------------------
@@ -497,10 +498,33 @@ def _compute_cluster_summary(
     has_category = 'category_str' in df.columns
 
     if has_session:
-        articles_per_session = df.loc[~is_homepage].groupby(['user_id', 'session_id']).size()
-        avg_articles_per_session = articles_per_session.groupby('user_id').mean().reindex(user_cluster.index, fill_value=0)
+        session_counts = (
+            df.groupby('user_id')['session_id']
+            .nunique()
+            .reindex(user_cluster.index, fill_value=0)
+            .astype(float)
+        )
+        impressions_per_session = df.groupby(['user_id', 'session_id']).size()
+        avg_impressions_per_session = impressions_per_session.groupby('user_id').mean().reindex(user_cluster.index, fill_value=0)
+
+        logged_in_mask = sub_per_user.astype(bool)
+        avg_sessions_logged_in = (
+            session_counts[logged_in_mask]
+            .groupby(user_cluster[logged_in_mask])
+            .mean()
+            .reindex(cluster_sizes.index)
+        )
+        avg_sessions_non_logged_in = (
+            session_counts[~logged_in_mask]
+            .groupby(user_cluster[~logged_in_mask])
+            .mean()
+            .reindex(cluster_sizes.index)
+        )
     else:
-        avg_articles_per_session = zero_user
+        session_counts = zero_user
+        avg_impressions_per_session = zero_user
+        avg_sessions_logged_in = pd.Series(np.nan, index=cluster_sizes.index)
+        avg_sessions_non_logged_in = pd.Series(np.nan, index=cluster_sizes.index)
 
     if has_category:
         valid_cat = df['category_str'].notna() & (df['category_str'] != '')
@@ -539,18 +563,14 @@ def _compute_cluster_summary(
     else:
         pct_morning = pct_afternoon = pct_evening = pct_night = zero_user
 
-    if has_session and time_seconds is not None:
-        session_time_bounds = (
-            pd.DataFrame({
-                'user_id': df['user_id'].values,
-                'session_id': df['session_id'].values,
-                '_ts': time_seconds.values if hasattr(time_seconds, 'values') else time_seconds,
-            })
-            .groupby(['user_id', 'session_id'])['_ts']
-            .agg(['max', 'min'])
+    if has_session and 'read_time' in df.columns:
+        # Avg Session Duration: sum of read_time per session (differs from legacy timestamp
+        # span max-min; includes single-impression sessions and avoids unit issues).
+        session_read_time = (
+            df.groupby(['user_id', 'session_id'])['read_time']
+            .sum()
         )
-        session_dur = session_time_bounds['max'] - session_time_bounds['min']
-        avg_session_duration = session_dur.groupby('user_id').mean().reindex(user_cluster.index, fill_value=0)
+        avg_session_duration = session_read_time.groupby('user_id').mean().reindex(user_cluster.index, fill_value=0)
     else:
         avg_session_duration = zero_user
 
@@ -564,9 +584,6 @@ def _compute_cluster_summary(
             shifted = valid_cat_df.groupby(session_keys)['category_str'].shift(1)
             switches = ((valid_cat_df['category_str'] != shifted) & shifted.notna()).astype(int)
             switches_per_session = switches.groupby([valid_cat_df['user_id'], valid_cat_df['session_id']]).sum()
-            session_sizes = valid_cat_df.groupby(session_keys).size()
-            valid_sessions = session_sizes[session_sizes > 1].index
-            switches_per_session = switches_per_session.loc[switches_per_session.index.isin(valid_sessions)]
             avg_cat_switches = switches_per_session.groupby(level=0).mean().reindex(user_cluster.index, fill_value=0)
         else:
             avg_cat_switches = zero_user
@@ -580,7 +597,8 @@ def _compute_cluster_summary(
     user_metrics['proportion_article_time'] = proportion_article_time
     user_metrics['avg_reading_time_homepage'] = avg_rt_homepage
     user_metrics['avg_reading_time_articles'] = avg_rt_articles
-    user_metrics['avg_articles_per_session'] = avg_articles_per_session
+    user_metrics['avg_impressions_per_session'] = avg_impressions_per_session
+    user_metrics['avg_sessions_per_user'] = session_counts
     user_metrics['avg_categories_read'] = num_categories
     user_metrics['avg_session_duration'] = avg_session_duration
     user_metrics['avg_category_switches'] = avg_cat_switches
@@ -600,7 +618,10 @@ def _compute_cluster_summary(
         'Proportion of Time on Articles': cluster_means['proportion_article_time'],
         'Avg Reading Time Homepage (s)': cluster_means['avg_reading_time_homepage'],
         'Avg Reading Time Articles (s)': cluster_means['avg_reading_time_articles'],
-        'Avg Articles per Session': cluster_means['avg_articles_per_session'],
+        'Avg Impressions per Session': cluster_means['avg_impressions_per_session'],
+        'Avg Sessions per User': cluster_means['avg_sessions_per_user'],
+        'Avg Sessions per Logged-in User': avg_sessions_logged_in.round(4),
+        'Avg Sessions per Non-logged-in User': avg_sessions_non_logged_in.round(4),
         'Avg Categories Read': cluster_means['avg_categories_read'],
         'Avg Session Duration (s)': cluster_means['avg_session_duration'],
         'Avg Category Switches per Session': cluster_means['avg_category_switches'],

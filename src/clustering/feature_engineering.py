@@ -427,7 +427,10 @@ def create_session_behavior_features(
         - avg_session_length: average impressions per session (includes homepage views in legacy mode)
         - avg_categories_per_session: unique categories per session, averaged
         - avg_category_switches: category switches within sessions, averaged
-        - avg_session_duration: session duration in seconds, averaged
+        - avg_session_duration: average total read_time per session (sum of read_time across
+          impressions in each session). Differs from legacy which used timestamp span
+          (max - min impression_time); this definition includes single-impression sessions
+          and avoids unit/timestamp issues.
     """
     logger.info("Creating session behavior features...")
     
@@ -453,6 +456,7 @@ def create_session_behavior_features(
         result['avg_session_length'] = avg_session_length.reindex(result.index, fill_value=0)
         
         # 3. avg_categories_per_session: unique categories per session, averaged
+        #    Legacy alignment: exclude sessions with 0 valid categories from the mean.
         if category_col in df.columns:
             # Filter for valid categories (non-empty, non-null)
             valid_cat_mask = (df[category_col].notna()) & (df[category_col] != '')
@@ -460,15 +464,15 @@ def create_session_behavior_features(
             
             if len(valid_df) > 0:
                 cats_per_session = valid_df.groupby([user_col, session_col])[category_col].nunique()
-                avg_cats_per_session = cats_per_session.groupby(user_col).mean()
+                cats_per_session = cats_per_session[cats_per_session > 0]  # exclude 0-category sessions
+                avg_cats_per_session = cats_per_session.groupby(level=0).mean()
                 result['avg_categories_per_session'] = avg_cats_per_session.reindex(result.index, fill_value=0)
             else:
                 result['avg_categories_per_session'] = 0
             
             # 4. avg_category_switches: category switches within sessions, averaged
-            # Vectorized implementation matching legacy behavior:
-            # - consider only valid categories
-            # - only sessions with >1 valid-category impressions contribute to the average
+            # Legacy alignment: include all sessions in valid_df (single-impression sessions
+            # contribute 0 switches to the average).
             sorted_df = valid_df.sort_values([user_col, session_col, time_col])
 
             if len(sorted_df) > 0:
@@ -478,12 +482,6 @@ def create_session_behavior_features(
                 switches_per_session = switches.groupby(
                     [sorted_df[user_col], sorted_df[session_col]]
                 ).sum()
-                session_sizes = sorted_df.groupby(session_keys).size()
-                valid_sessions = session_sizes[session_sizes > 1].index
-                switches_per_session = switches_per_session.loc[
-                    switches_per_session.index.isin(valid_sessions)
-                ]
-
                 avg_switches = switches_per_session.groupby(level=0).mean()
                 result['avg_category_switches'] = avg_switches.reindex(result.index, fill_value=0)
             else:
@@ -492,31 +490,13 @@ def create_session_behavior_features(
             result['avg_categories_per_session'] = 0
             result['avg_category_switches'] = 0
         
-        # 5. avg_session_duration: session duration in seconds, averaged
-        if time_col in df.columns:
-            # Convert to datetime if needed for duration calculation
-            time_data = df[time_col]
-            
-            # Handle milliseconds vs seconds
-            if time_data.dtype in ['int64', 'float64']:
-                divisor = 1000 if time_data.max() > 10**12 else 1
-                time_seconds = time_data / divisor
-            else:
-                # Convert datetime to seconds since epoch
-                time_seconds = pd.to_datetime(time_data).astype('int64') / 1e9
-            
-            # Calculate session duration: max - min time per session
-            session_time_bounds = (
-                pd.DataFrame({
-                    user_col: df[user_col].values,
-                    session_col: df[session_col].values,
-                    '_time_seconds': time_seconds.values if hasattr(time_seconds, "values") else time_seconds,
-                })
-                .groupby([user_col, session_col])['_time_seconds']
-                .agg(['max', 'min'])
+        # 5. avg_session_duration: average summed read_time per session
+        if read_time_col in df.columns:
+            session_read_time = (
+                df.groupby([user_col, session_col])[read_time_col]
+                .sum()
             )
-            session_duration = session_time_bounds['max'] - session_time_bounds['min']
-            avg_session_duration = session_duration.groupby(user_col).mean()
+            avg_session_duration = session_read_time.groupby(user_col).mean()
             result['avg_session_duration'] = avg_session_duration.reindex(result.index, fill_value=0)
         else:
             result['avg_session_duration'] = 0

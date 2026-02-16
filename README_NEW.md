@@ -340,6 +340,10 @@ Run:
 python scripts/run_full_pipeline.py --dataset ad --config config_ad_s3.json
 ```
 
+```bash
+python scripts/run_full_pipeline.py --dataset hln --config config_hln.json
+```
+
 ### Smoke Test Before Full Run (Recommended)
 
 Start with a small run first:
@@ -354,6 +358,10 @@ python scripts/run_full_pipeline.py \
   --input-dir s3://<bucket>/<prefix>/ad \
   --n-clusters 3 \
   --skip-evaluation
+```
+or skip clustering
+```bash
+python scripts/run_full_pipeline.py --config runs/ad_20260212_160426/config.json --skip-conversion --skip-clustering --content-mode embeddings --verbose
 ```
 
 Then remove limits for the full run.
