@@ -210,12 +210,28 @@ def add_time_features(
     df = df.copy()
     
     # Convert timestamp to datetime if needed
-    if df[time_col].dtype in ['int64', 'float64']:
-        # Assume milliseconds if large values
-        divisor = 1000 if df[time_col].max() > 10**12 else 1
-        dt = pd.to_datetime(df[time_col] // divisor, unit='s')
+    if pd.api.types.is_datetime64_any_dtype(df[time_col]):
+        dt = pd.to_datetime(df[time_col], errors="coerce")
+    elif pd.api.types.is_numeric_dtype(df[time_col]):
+        # Handle nullable pandas integer dtype (e.g., Int64) and infer unit by magnitude.
+        # AD/HLN impressions store Unix milliseconds as Int64; parsing those as ns would
+        # collapse hours to ~00:xx and yield "all night" features.
+        ts = pd.to_numeric(df[time_col], errors="coerce")
+        max_val = ts.max(skipna=True)
+        if pd.isna(max_val):
+            dt = pd.to_datetime(df[time_col], errors="coerce")
+        else:
+            if max_val > 1e17:
+                unit = "ns"
+            elif max_val > 1e14:
+                unit = "us"
+            elif max_val > 1e11:
+                unit = "ms"
+            else:
+                unit = "s"
+            dt = pd.to_datetime(ts, unit=unit, errors="coerce")
     else:
-        dt = pd.to_datetime(df[time_col])
+        dt = pd.to_datetime(df[time_col], errors="coerce")
     
     # Extract hour
     hour = dt.dt.hour

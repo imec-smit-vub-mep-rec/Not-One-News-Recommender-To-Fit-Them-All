@@ -14,7 +14,7 @@ openpyxl>=3.1.0      # For Excel export of cluster profiles
 awswrangler>=3.0.0   # For S3 partitioned dataset reads on SageMaker
 
 # Recommendation evaluation
-recpack>=0.3.0
+recpack>=0.3.6
 
 # Content-based recommendations
 sentence-transformers>=2.2.0
