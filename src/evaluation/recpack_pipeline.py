@@ -34,6 +34,13 @@ except ImportError:
     HAS_RECPACK = False
     logger.warning("RecPack not available. Install with: pip install recpack")
 
+# Add safe globals for MultVAE to avoid serialization errors
+import torch.serialization
+try:
+    from recpack.algorithms.mult_vae import MultiVAETorch
+    torch.serialization.add_safe_globals([MultiVAETorch])
+except ImportError:
+    pass  # RecPack/MultVAE not installed
 
 def check_recpack_available():
     """Check if RecPack is available."""
