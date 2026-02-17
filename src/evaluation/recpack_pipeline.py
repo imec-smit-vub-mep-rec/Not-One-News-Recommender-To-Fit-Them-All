@@ -4,6 +4,17 @@ RecPack evaluation pipeline.
 Provides a unified interface for running recommendation algorithm evaluations.
 """
 
+# PyTorch 2.6+ defaults to weights_only=True in torch.load, which breaks RecPack
+# MultVAE checkpoints (they pickle custom classes). Patch to use weights_only=False
+# for trusted checkpoints from our own runs.
+import torch
+_original_torch_load = torch.load
+def _patched_torch_load(*args, **kwargs):
+    if "weights_only" not in kwargs:
+        kwargs["weights_only"] = False
+    return _original_torch_load(*args, **kwargs)
+torch.load = _patched_torch_load
+
 from typing import Dict, List, Optional, Any, Tuple, Set
 import pandas as pd
 import numpy as np
@@ -33,14 +44,6 @@ try:
 except ImportError:
     HAS_RECPACK = False
     logger.warning("RecPack not available. Install with: pip install recpack")
-
-# Add safe globals for MultVAE to avoid serialization errors
-import torch.serialization
-try:
-    from recpack.algorithms.mult_vae import MultiVAETorch
-    torch.serialization.add_safe_globals([MultiVAETorch])
-except ImportError:
-    pass  # RecPack/MultVAE not installed
 
 def check_recpack_available():
     """Check if RecPack is available."""
