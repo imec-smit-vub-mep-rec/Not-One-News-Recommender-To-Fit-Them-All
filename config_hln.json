@@ -9,6 +9,7 @@
   },
   "clustering": {
     "k_selection_method": "elbow",
+    "n_clusters": 3,
     "legacy_features": true
   },
   "evaluation": {
@@ -16,9 +17,9 @@
     "content_mode": "embeddings",
     "algorithms": [
       {"name": "Popularity", "enabled": true},
-      {"name": "ItemKNN", "enabled": false},
+      {"name": "ItemKNN", "enabled": true},
       {"name": "EASE", "enabled": false},
-      {"name": "MultVAE", "enabled": true},
+      {"name": "MultVAE", "enabled": false},
       {"name": "CB-ST", "enabled": false}
     ]
   }

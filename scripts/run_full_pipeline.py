@@ -569,14 +569,28 @@ def _compute_cluster_summary(
             'afternoon': ((hour >= 12) & (hour < 18)).values,
             'evening': ((hour >= 18) & (hour < 24)).values,
             'night': ((hour >= 0) & (hour < 6)).values,
+            'weekend': (dt.dt.dayofweek >= 5).values,
         })
         time_means = time_flags.groupby('user_id').mean()
         pct_morning = time_means['morning'].reindex(user_cluster.index, fill_value=0)
         pct_afternoon = time_means['afternoon'].reindex(user_cluster.index, fill_value=0)
         pct_evening = time_means['evening'].reindex(user_cluster.index, fill_value=0)
         pct_night = time_means['night'].reindex(user_cluster.index, fill_value=0)
+        pct_weekend = time_means['weekend'].reindex(user_cluster.index, fill_value=0)
+
+        _time_agg = df.groupby('user_id')['impression_time'].agg(['min', 'max'])
+        if pd.api.types.is_datetime64_any_dtype(_time_agg['max']):
+            _span = (_time_agg['max'] - _time_agg['min']).dt.total_seconds() / (24 * 3600)
+        else:
+            _tmax = pd.to_numeric(_time_agg['max'], errors='coerce')
+            _tmin = pd.to_numeric(_time_agg['min'], errors='coerce')
+            if _tmax.max() > 10**12:
+                _tmax, _tmin = _tmax / 1000, _tmin / 1000
+            _span = (_tmax - _tmin) / (24 * 3600)
+        engagement_span_days = _span.reindex(user_cluster.index, fill_value=0)
     else:
-        pct_morning = pct_afternoon = pct_evening = pct_night = zero_user
+        pct_morning = pct_afternoon = pct_evening = pct_night = pct_weekend = zero_user
+        engagement_span_days = zero_user
 
     if has_session and 'read_time' in df.columns:
         # Avg Session Duration: sum of read_time per session (differs from legacy timestamp
@@ -605,6 +619,59 @@ def _compute_cluster_summary(
     else:
         avg_cat_switches = zero_user
 
+    # --- Device breakdown (if column present) ----------------------------------------
+    if 'device_type' in df.columns:
+        _dev = df[['user_id', 'device_type']].copy()
+        _dev['device_type'] = _dev['device_type'].fillna('unknown').str.lower()
+        _dev_dummies = pd.get_dummies(_dev, columns=['device_type'], prefix='', prefix_sep='')
+        _dev_cols = [c for c in _dev_dummies.columns if c != 'user_id']
+        _dev_means = _dev_dummies.groupby('user_id')[_dev_cols].mean()
+        device_desktop = _dev_means.get('desktop', pd.Series(0.0, index=_dev_means.index)).reindex(user_cluster.index, fill_value=0)
+        device_mobile = _dev_means.get('mobile', pd.Series(0.0, index=_dev_means.index)).reindex(user_cluster.index, fill_value=0)
+        device_tablet = _dev_means.get('tablet', pd.Series(0.0, index=_dev_means.index)).reindex(user_cluster.index, fill_value=0)
+    else:
+        device_desktop = device_mobile = device_tablet = None
+
+    # --- Scroll depth (if column present) -------------------------------------------
+    if 'scroll_depth' in df.columns:
+        avg_scroll_depth = df.groupby('user_id')['scroll_depth'].mean().reindex(user_cluster.index, fill_value=0)
+    else:
+        avg_scroll_depth = None
+
+    # --- Homepage / article impression counts per user ------------------------------
+    hp_count_per_user = df[is_homepage].groupby('user_id').size().reindex(user_cluster.index, fill_value=0).astype(float)
+    art_count_per_user = df[~is_homepage].groupby('user_id').size().reindex(user_cluster.index, fill_value=0).astype(float)
+    _total_per_user = (hp_count_per_user + art_count_per_user).replace(0, np.nan)
+    homepage_ratio_user = (hp_count_per_user / _total_per_user).fillna(0)
+
+    # --- Diversity metrics (entropy & gini from raw category data) ------------------
+    if has_category:
+        _valid_cat = df['category_str'].notna() & (df['category_str'] != '')
+        _vdf = df.loc[_valid_cat, ['user_id', 'category_str']]
+        if not _vdf.empty:
+            _ucc = _vdf.groupby(['user_id', 'category_str']).size().unstack(fill_value=0)
+            _ucp = _ucc.div(_ucc.sum(axis=1), axis=0)
+            _logp = np.where(_ucp.values > 0, np.log(_ucp.values + 1e-10), 0)
+            category_entropy = pd.Series(
+                -(_ucp.values * _logp).sum(axis=1), index=_ucc.index,
+            ).reindex(user_cluster.index, fill_value=0)
+            _arr = _ucc.reindex(user_cluster.index, fill_value=0).to_numpy(dtype=np.float64)
+            _nc = _arr.shape[1]
+            _sorted = np.sort(_arr, axis=1)
+            _rs = _sorted.sum(axis=1)
+            _idx_arr = np.arange(1, _nc + 1, dtype=np.float64)
+            _num = ((2.0 * _idx_arr - _nc - 1.0) * _sorted).sum(axis=1)
+            _den = _nc * _rs + 1e-10
+            category_gini = pd.Series(
+                np.where(_rs > 0, _num / _den, 0.0), index=user_cluster.index,
+            )
+        else:
+            category_entropy = zero_user
+            category_gini = zero_user
+    else:
+        category_entropy = zero_user
+        category_gini = zero_user
+
     # --- Build per-user table, then average per cluster -----------------------------
     user_metrics = pd.DataFrame(index=user_cluster.index)
     user_metrics['cluster_id'] = user_cluster.values
@@ -621,6 +688,19 @@ def _compute_cluster_summary(
     user_metrics['pct_afternoon'] = pct_afternoon
     user_metrics['pct_evening'] = pct_evening
     user_metrics['pct_night'] = pct_night
+    user_metrics['pct_weekend'] = pct_weekend
+    user_metrics['engagement_span_days'] = engagement_span_days
+    user_metrics['avg_homepage_impressions'] = hp_count_per_user
+    user_metrics['avg_article_impressions'] = art_count_per_user
+    user_metrics['homepage_ratio'] = homepage_ratio_user
+    user_metrics['category_entropy'] = category_entropy
+    user_metrics['category_gini'] = category_gini
+    if device_desktop is not None:
+        user_metrics['device_desktop'] = device_desktop
+        user_metrics['device_mobile'] = device_mobile
+        user_metrics['device_tablet'] = device_tablet
+    if avg_scroll_depth is not None:
+        user_metrics['avg_scroll_depth'] = avg_scroll_depth
     user_metrics = user_metrics.fillna(0)
 
     cluster_means = user_metrics.groupby('cluster_id').mean().round(4)
@@ -644,9 +724,107 @@ def _compute_cluster_summary(
         'Afternoon (%)': (cluster_means['pct_afternoon'] * 100).round(2),
         'Evening (%)': (cluster_means['pct_evening'] * 100).round(2),
         'Night (%)': (cluster_means['pct_night'] * 100).round(2),
+        'Weekend (%)': (cluster_means['pct_weekend'] * 100).round(2),
+        'Avg Engagement Span (days)': cluster_means['engagement_span_days'].round(2),
+        'Avg Homepage Impressions': cluster_means['avg_homepage_impressions'].round(2),
+        'Avg Article Impressions': cluster_means['avg_article_impressions'].round(2),
+        'Homepage Ratio': cluster_means['homepage_ratio'].round(4),
+        'Avg Category Entropy': cluster_means['category_entropy'].round(4),
+        'Avg Category Gini': cluster_means['category_gini'].round(4),
     })
 
-    return summary
+    if 'device_desktop' in cluster_means.columns:
+        summary['Desktop (%)'] = (cluster_means['device_desktop'] * 100).round(2)
+        summary['Mobile (%)'] = (cluster_means['device_mobile'] * 100).round(2)
+        summary['Tablet (%)'] = (cluster_means['device_tablet'] * 100).round(2)
+    if 'avg_scroll_depth' in cluster_means.columns:
+        summary['Avg Scroll Depth'] = cluster_means['avg_scroll_depth'].round(4)
+
+    return summary, user_metrics
+
+
+def _compute_category_profiles(
+    impressions_df: 'pd.DataFrame',
+    users_df: 'pd.DataFrame',
+    articles_df: 'pd.DataFrame | None' = None,
+    top_n: int = 10,
+) -> 'pd.DataFrame | None':
+    """Compute top-N category preferences per cluster from raw impressions.
+
+    Returns a DataFrame with columns: cluster_id, category, impressions,
+    proportion_pct, rank.  Returns ``None`` when category data is unavailable.
+    """
+    import pandas as pd
+
+    user_cluster = users_df.drop_duplicates().set_index('user_id')['cluster_id']
+
+    needed = ['user_id', 'article_id']
+    if 'category_str' in impressions_df.columns:
+        needed.append('category_str')
+    df = impressions_df[impressions_df['user_id'].isin(user_cluster.index)][needed].copy()
+    df['cluster_id'] = df['user_id'].map(user_cluster)
+
+    if 'category_str' not in df.columns and articles_df is not None and 'category_str' in articles_df.columns:
+        cat_lookup = articles_df[['article_id', 'category_str']].drop_duplicates(subset='article_id')
+        df = df.merge(cat_lookup, on='article_id', how='left')
+
+    if 'category_str' not in df.columns:
+        return None
+
+    valid = df[df['category_str'].notna() & (df['category_str'] != '')]
+    if valid.empty:
+        return None
+
+    counts = valid.groupby(['cluster_id', 'category_str']).size().reset_index(name='impressions')
+    totals = counts.groupby('cluster_id')['impressions'].transform('sum')
+    counts['proportion_pct'] = (counts['impressions'] / totals * 100).round(2)
+    counts['rank'] = (
+        counts.groupby('cluster_id')['impressions']
+        .rank(ascending=False, method='min')
+        .astype(int)
+    )
+    counts = counts.sort_values(['cluster_id', 'rank'])
+    counts = counts.rename(columns={'category_str': 'category'})
+    return counts[counts['rank'] <= top_n]
+
+
+def _compute_cluster_distributions(
+    user_metrics: 'pd.DataFrame',
+) -> 'pd.DataFrame':
+    """Compute percentile distributions per cluster for key user metrics.
+
+    Returns a DataFrame with columns: cluster_id, metric, mean, std, min,
+    p25, median, p75, max.
+    """
+    import pandas as pd
+
+    key_metrics = [
+        'avg_reading_time', 'avg_sessions_per_user', 'avg_impressions_per_session',
+        'avg_session_duration', 'avg_categories_read', 'avg_category_switches',
+        'engagement_span_days', 'category_entropy', 'category_gini',
+        'avg_homepage_impressions', 'avg_article_impressions', 'homepage_ratio',
+    ]
+    available = [m for m in key_metrics if m in user_metrics.columns]
+    if not available:
+        return pd.DataFrame()
+
+    rows = []
+    for cluster_id, group in user_metrics.groupby('cluster_id'):
+        for metric in available:
+            vals = group[metric]
+            rows.append({
+                'cluster_id': cluster_id,
+                'metric': metric,
+                'mean': round(float(vals.mean()), 4),
+                'std': round(float(vals.std()), 4),
+                'min': round(float(vals.min()), 4),
+                'p25': round(float(vals.quantile(0.25)), 4),
+                'median': round(float(vals.quantile(0.50)), 4),
+                'p75': round(float(vals.quantile(0.75)), 4),
+                'max': round(float(vals.max()), 4),
+            })
+
+    return pd.DataFrame(rows)
 
 
 def save_cluster_profiles_excel(
@@ -660,17 +838,24 @@ def save_cluster_profiles_excel(
     impressions_df: 'pd.DataFrame | None' = None,
     articles_df: 'pd.DataFrame | None' = None,
     subscriber_label: str = "Number of Subscribers",
+    per_cluster_silhouette: 'dict | None' = None,
 ) -> Path:
     """Save cluster profiles to an Excel file in the clusters/ directory.
 
     Creates a multi-sheet workbook:
-      - **Cluster Summary**: legacy-style interpretable report with raw averages,
-        subscriber counts, and time-of-day breakdown (computed from raw
-        impressions when available).
+      - **Cluster Summary**: interpretable report with raw averages,
+        subscriber counts, time-of-day/weekend breakdown, engagement span,
+        diversity metrics, device breakdown, and scroll depth (computed from
+        raw impressions when available).
       - **Cluster Centers (Scaled)**: centroid values per feature (scaled).
       - **Cluster Statistics**: mean and std of every feature per cluster
         plus cluster size.
-      - **Summary**: metadata (n_clusters, n_users, features, eval metrics).
+      - **Summary**: metadata (n_clusters, n_users, features, eval metrics,
+        per-cluster silhouette scores).
+      - **Category Profiles**: top-N categories per cluster by impression
+        proportion.
+      - **Cluster Distributions**: percentile breakdowns (p25, median, p75)
+        of key per-user metrics within each cluster.
 
     Args:
         features_df: DataFrame with user features *and* ``cluster_id`` column.
@@ -689,6 +874,8 @@ def save_cluster_profiles_excel(
                      ``_compute_cluster_summary`` so that category-based
                      metrics can be computed even when *impressions_df*
                      does not contain category information.
+        per_cluster_silhouette: Optional dict mapping cluster_id to the
+                                mean silhouette score of that cluster's users.
 
     Returns:
         Path to the written Excel file.
@@ -702,11 +889,14 @@ def save_cluster_profiles_excel(
     size_map = dict(zip(unique, counts))
 
     # --- Sheet 1: Cluster Summary (interpretable) -----------------------------------
+    user_metrics = None
     if impressions_df is not None:
         users_df = features_df[['user_id', 'cluster_id']].drop_duplicates()
-        cluster_summary = _compute_cluster_summary(impressions_df, users_df, subscriber_label=subscriber_label, articles_df=articles_df)
+        cluster_summary, user_metrics = _compute_cluster_summary(
+            impressions_df, users_df,
+            subscriber_label=subscriber_label, articles_df=articles_df,
+        )
     elif scaler is not None:
-        # Fallback: inverse-transform cluster centers
         center_vals = cluster_centers[feature_names].values
         raw_center_vals = scaler.inverse_transform(center_vals)
         cluster_summary = pd.DataFrame(raw_center_vals, columns=feature_names)
@@ -733,8 +923,26 @@ def save_cluster_profiles_excel(
     ]
     for key, val in eval_metrics.items():
         summary_rows.append((key, val))
+    if per_cluster_silhouette:
+        for cid in sorted(per_cluster_silhouette):
+            summary_rows.append(
+                (f"silhouette_cluster_{cid}", round(per_cluster_silhouette[cid], 4))
+            )
 
     summary_df = pd.DataFrame(summary_rows, columns=["Metric", "Value"])
+
+    # --- Sheet 5: Category Profiles -------------------------------------------------
+    category_profiles = None
+    if impressions_df is not None:
+        _users = features_df[['user_id', 'cluster_id']].drop_duplicates()
+        category_profiles = _compute_category_profiles(
+            impressions_df, _users, articles_df=articles_df,
+        )
+
+    # --- Sheet 6: Cluster Distributions ---------------------------------------------
+    distributions = None
+    if user_metrics is not None:
+        distributions = _compute_cluster_distributions(user_metrics)
 
     # --- Write workbook -------------------------------------------------------------
     with pd.ExcelWriter(excel_path, engine="openpyxl") as writer:
@@ -743,9 +951,60 @@ def save_cluster_profiles_excel(
         centers.to_excel(writer, sheet_name="Cluster Centers (Scaled)", index=False)
         stats.to_excel(writer, sheet_name="Cluster Statistics", index=False)
         summary_df.to_excel(writer, sheet_name="Summary", index=False)
+        if category_profiles is not None and not category_profiles.empty:
+            category_profiles.to_excel(writer, sheet_name="Category Profiles", index=False)
+        if distributions is not None and not distributions.empty:
+            distributions.to_excel(writer, sheet_name="Cluster Distributions", index=False)
 
     logger.info(f"Saved cluster profiles Excel to {excel_path}")
     return excel_path
+
+
+def append_recommendation_performance(
+    session: Session,
+    eval_results: dict,
+) -> None:
+    """Append a Recommendation Performance sheet to the cluster profiles Excel.
+
+    This is called *after* evaluation completes so that per-cluster algorithm
+    metrics are available.  If the Excel file does not exist or no valid
+    results are provided, the call is a no-op.
+
+    Args:
+        session: Current pipeline session.
+        eval_results: Dict mapping cluster_id to results DataFrame (as
+                      returned by ``run_cluster_evaluation``).
+    """
+    import pandas as pd
+    from openpyxl import load_workbook
+
+    excel_path = session.get_path("cluster_profiles.xlsx", subdir="clusters")
+    if not Path(excel_path).exists():
+        logger.warning("cluster_profiles.xlsx not found; skipping recommendation performance sheet")
+        return
+
+    frames = []
+    for cluster_id, results_df in eval_results.items():
+        if results_df is None or (hasattr(results_df, 'empty') and results_df.empty):
+            continue
+        rdf = results_df.copy()
+        rdf.insert(0, 'cluster_id', cluster_id)
+        frames.append(rdf)
+
+    if not frames:
+        return
+
+    perf_df = pd.concat(frames, ignore_index=True).sort_values(['cluster_id', 'algorithm'])
+
+    wb = load_workbook(excel_path)
+    if 'Recommendation Performance' in wb.sheetnames:
+        del wb['Recommendation Performance']
+    wb.save(excel_path)
+
+    with pd.ExcelWriter(excel_path, engine='openpyxl', mode='a') as writer:
+        perf_df.to_excel(writer, sheet_name='Recommendation Performance', index=False)
+
+    logger.info("Appended Recommendation Performance sheet to cluster_profiles.xlsx")
 
 
 def run_clustering(
@@ -811,6 +1070,18 @@ def run_clustering(
     # Evaluate clustering
     eval_metrics = clusterer.evaluate(X)
     logger.info(f"Clustering evaluation: {eval_metrics}")
+
+    # Per-cluster silhouette scores
+    per_cluster_silhouette = {}
+    try:
+        from sklearn.metrics import silhouette_samples
+        import numpy as _np
+        _sample_sil = silhouette_samples(X, labels)
+        for _cid in _np.unique(labels):
+            per_cluster_silhouette[int(_cid)] = float(_sample_sil[labels == _cid].mean())
+        logger.info(f"Per-cluster silhouette: {per_cluster_silhouette}")
+    except Exception as _e:
+        logger.warning(f"Could not compute per-cluster silhouette: {_e}")
     
     # Visualize
     viz_dir = session.get_path("visualizations")
@@ -842,6 +1113,7 @@ def run_clustering(
         impressions_df=impressions_df,
         articles_df=articles_df,
         subscriber_label=subscriber_label,
+        per_cluster_silhouette=per_cluster_silhouette or None,
     )
     
     return features_df, labels, {
@@ -978,6 +1250,12 @@ def run_evaluation(
     
     logger.info(f"Saved evaluation report to {report_path}")
     print("\n" + report)
+
+    # Append recommendation performance to cluster profiles Excel
+    try:
+        append_recommendation_performance(session, results)
+    except Exception as _e:
+        logger.warning(f"Could not append recommendation performance sheet: {_e}")
     
     log_memory("evaluation end")
     return results
