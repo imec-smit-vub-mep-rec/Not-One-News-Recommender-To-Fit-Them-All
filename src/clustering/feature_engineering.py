@@ -11,6 +11,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.impute import SimpleImputer
 
 from ..utils.logging import get_logger
+from ..utils.datetime import parse_timestamp_series
 
 
 logger = get_logger("clustering.feature_engineering")
@@ -84,28 +85,7 @@ def create_time_features(
     logger.info("Creating time features...")
     
     # Convert timestamp to datetime
-    if pd.api.types.is_datetime64_any_dtype(df[time_col]):
-        dt = pd.to_datetime(df[time_col], errors="coerce")
-    elif pd.api.types.is_numeric_dtype(df[time_col]):
-        # Handle nullable pandas integer dtype (e.g., Int64) and infer unit by magnitude.
-        # AD/HLN impressions store Unix milliseconds as Int64; parsing those as ns would
-        # collapse hours to ~00:xx and yield "all night" features.
-        ts = pd.to_numeric(df[time_col], errors="coerce")
-        max_val = ts.max(skipna=True)
-        if pd.isna(max_val):
-            dt = pd.to_datetime(df[time_col], errors="coerce")
-        else:
-            if max_val > 1e17:
-                unit = "ns"
-            elif max_val > 1e14:
-                unit = "us"
-            elif max_val > 1e11:
-                unit = "ms"
-            else:
-                unit = "s"
-            dt = pd.to_datetime(ts, unit=unit, errors="coerce")
-    else:
-        dt = pd.to_datetime(df[time_col], errors="coerce")
+    dt = parse_timestamp_series(df[time_col])
     
     # Extract hour
     hour = dt.dt.hour
@@ -175,20 +155,11 @@ def create_activity_features(
     
     # Time-based features
     if time_col in df.columns:
-        # Engagement span (days)
-        time_agg = df.groupby(user_col)[time_col].agg(['min', 'max'])
-        
-        # Handle datetime vs numeric timestamps
-        if pd.api.types.is_datetime64_any_dtype(time_agg['max']):
-            # Convert datetime to seconds for calculation
-            activity['engagement_span_days'] = (
-                (time_agg['max'] - time_agg['min']).dt.total_seconds() / (24 * 3600)
-            ).values
-        else:
-            # Handle milliseconds for numeric timestamps
-            if time_agg['max'].max() > 10**12:
-                time_agg = time_agg // 1000
-            activity['engagement_span_days'] = (time_agg['max'] - time_agg['min']) / (24 * 3600)
+        # Engagement span (days), robust to timestamp format (ISO strings, unix, etc.)
+        dt = parse_timestamp_series(df[time_col])
+        time_agg = dt.groupby(df[user_col]).agg(['min', 'max'])
+        span_days = (time_agg['max'] - time_agg['min']).dt.total_seconds() / (24 * 3600)
+        activity['engagement_span_days'] = span_days.fillna(0).reindex(activity.index, fill_value=0).values
     
     activity = activity.reset_index()
     

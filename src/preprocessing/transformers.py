@@ -12,6 +12,7 @@ import numpy as np
 from ..config.schema import ColumnNames
 from ..utils.logging import get_logger
 from ..utils.io import save_dataframe
+from ..utils.datetime import parse_timestamp_series
 
 
 logger = get_logger("preprocessing.transformers")
@@ -65,15 +66,13 @@ def behaviors_to_interactions(
     df[item_col] = df[item_col].astype(str)
     
     # Handle timestamp conversion
-    if pd.api.types.is_datetime64_any_dtype(df[time_col]):
-        # Convert datetime to Unix timestamp (seconds)
-        df[time_col] = df[time_col].astype('int64') // 10**9
-    else:
-        # Normalize timestamp to seconds if in milliseconds
-        max_time = df[time_col].max()
-        if pd.notna(max_time) and max_time > 10**12:
-            df[time_col] = df[time_col] // 1000
-        df[time_col] = df[time_col].astype(np.int64)
+    # Accept ISO8601 strings (e.g. "...Z"), unix ints/floats, and unix-as-strings.
+    # Normalize everything to Unix seconds as int64 for RecPack.
+    dt = parse_timestamp_series(df[time_col])
+    valid_mask = dt.notna()
+    df = df[valid_mask].copy()
+    dt = dt[valid_mask]
+    df[time_col] = (dt.astype("int64") // 10**9).astype(np.int64)
     
     # Log statistics
     removed = initial_count - len(df)
@@ -210,28 +209,7 @@ def add_time_features(
     df = df.copy()
     
     # Convert timestamp to datetime if needed
-    if pd.api.types.is_datetime64_any_dtype(df[time_col]):
-        dt = pd.to_datetime(df[time_col], errors="coerce")
-    elif pd.api.types.is_numeric_dtype(df[time_col]):
-        # Handle nullable pandas integer dtype (e.g., Int64) and infer unit by magnitude.
-        # AD/HLN impressions store Unix milliseconds as Int64; parsing those as ns would
-        # collapse hours to ~00:xx and yield "all night" features.
-        ts = pd.to_numeric(df[time_col], errors="coerce")
-        max_val = ts.max(skipna=True)
-        if pd.isna(max_val):
-            dt = pd.to_datetime(df[time_col], errors="coerce")
-        else:
-            if max_val > 1e17:
-                unit = "ns"
-            elif max_val > 1e14:
-                unit = "us"
-            elif max_val > 1e11:
-                unit = "ms"
-            else:
-                unit = "s"
-            dt = pd.to_datetime(ts, unit=unit, errors="coerce")
-    else:
-        dt = pd.to_datetime(df[time_col], errors="coerce")
+    dt = parse_timestamp_series(df[time_col])
     
     # Extract hour
     hour = dt.dt.hour
