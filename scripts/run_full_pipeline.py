@@ -26,6 +26,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.config import PipelineConfig, load_config, save_config, PRESET_CONFIGS
 from src.utils import Session, setup_logging, get_logger, load_dataframe, save_dataframe, log_memory
+from src.utils.datetime import parse_timestamp_series
 from src.converters import ADConverter, AdressaConverter, EBNeRDConverter, GenericConverter
 from src.preprocessing import DataCleaner, DataValidator, behaviors_to_interactions, articles_to_content
 from src.clustering import UserFeatureExtractor, KMeansClusterer, ClusterVisualizer
@@ -554,14 +555,9 @@ def _compute_cluster_summary(
 
     time_seconds = None
     if 'impression_time' in df.columns:
-        ts = df['impression_time']
-        if ts.dtype in ['int64', 'float64']:
-            divisor = 1000 if ts.max() > 10**12 else 1
-            time_seconds = ts / divisor
-            dt = pd.to_datetime(ts // divisor, unit='s')
-        else:
-            dt = pd.to_datetime(ts, errors='coerce')
-            time_seconds = dt.astype('int64') / 1e9
+        # Robust parsing for Int64 (nullable) unix-ms, unix-as-string, and ISO8601 ("...Z").
+        dt = parse_timestamp_series(df['impression_time'])
+        time_seconds = dt.astype('int64') / 1e9
         hour = dt.dt.hour
         time_flags = pd.DataFrame({
             'user_id': df['user_id'].values,
@@ -578,16 +574,9 @@ def _compute_cluster_summary(
         pct_night = time_means['night'].reindex(user_cluster.index, fill_value=0)
         pct_weekend = time_means['weekend'].reindex(user_cluster.index, fill_value=0)
 
-        _time_agg = df.groupby('user_id')['impression_time'].agg(['min', 'max'])
-        if pd.api.types.is_datetime64_any_dtype(_time_agg['max']):
-            _span = (_time_agg['max'] - _time_agg['min']).dt.total_seconds() / (24 * 3600)
-        else:
-            _tmax = pd.to_numeric(_time_agg['max'], errors='coerce')
-            _tmin = pd.to_numeric(_time_agg['min'], errors='coerce')
-            if _tmax.max() > 10**12:
-                _tmax, _tmin = _tmax / 1000, _tmin / 1000
-            _span = (_tmax - _tmin) / (24 * 3600)
-        engagement_span_days = _span.reindex(user_cluster.index, fill_value=0)
+        _time_agg = dt.groupby(df['user_id']).agg(['min', 'max'])
+        _span = (_time_agg['max'] - _time_agg['min']).dt.total_seconds() / (24 * 3600)
+        engagement_span_days = _span.reindex(user_cluster.index, fill_value=0).fillna(0)
     else:
         pct_morning = pct_afternoon = pct_evening = pct_night = pct_weekend = zero_user
         engagement_span_days = zero_user
@@ -607,7 +596,7 @@ def _compute_cluster_summary(
         valid_cat_df = df.loc[df['category_str'].notna() & (df['category_str'] != ''), ['user_id', 'session_id', 'category_str']].copy()
         if not valid_cat_df.empty:
             if 'impression_time' in df.columns:
-                valid_cat_df['_ts'] = time_seconds.loc[valid_cat_df.index].values if hasattr(time_seconds, 'loc') else 0
+                valid_cat_df['_ts'] = time_seconds.reindex(valid_cat_df.index).values
                 valid_cat_df = valid_cat_df.sort_values(['user_id', 'session_id', '_ts'])
             session_keys = ['user_id', 'session_id']
             shifted = valid_cat_df.groupby(session_keys)['category_str'].shift(1)

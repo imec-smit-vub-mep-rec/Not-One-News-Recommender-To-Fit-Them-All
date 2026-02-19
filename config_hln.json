@@ -5,11 +5,10 @@
     "format": "spark_csv",
     "event_types": ["home_page_view", "article_page_view"],
     "start_time_min": "2026-01-05T19:19:58.665Z",
-    "start_time_max": "2026-01-06T19:19:58.665Z"
+    "start_time_max": "2026-01-12T19:19:58.665Z"
   },
   "clustering": {
     "k_selection_method": "elbow",
-    "n_clusters": 3,
     "legacy_features": true
   },
   "evaluation": {
@@ -18,9 +17,9 @@
     "algorithms": [
       {"name": "Popularity", "enabled": true},
       {"name": "ItemKNN", "enabled": true},
-      {"name": "EASE", "enabled": false},
-      {"name": "MultVAE", "enabled": false},
-      {"name": "CB-ST", "enabled": false}
+      {"name": "EASE", "enabled": true},
+      {"name": "MultVAE", "enabled": true},
+      {"name": "CB-ST", "enabled": true}
     ]
   }
 }
