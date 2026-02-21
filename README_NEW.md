@@ -401,7 +401,7 @@ python scripts/run_full_pipeline.py --config runs/ad_20260212_160426/config.json
 
 2. **Config from existing run** – use that run’s `config.json` (it contains the run_id):
    ```bash
-   python scripts/run_full_pipeline.py --config runs/hln_20260216_130931/config.json --skip-conversion --skip-clustering --verbose
+   python scripts/run_full_pipeline.py --config runs/hln_20260219_131303/config.json --skip-conversion --skip-clustering --content-mode embeddings --verbose
    ```
 
 3. **`session.run_id` in config** – add to your JSON:
@@ -412,7 +412,7 @@ python scripts/run_full_pipeline.py --config runs/ad_20260212_160426/config.json
 ```bash
 python scripts/run_full_pipeline.py --config config_hln.json --verbose --content-mode embeddings
 
-python scripts/run_full_pipeline.py --config config_hln.json --skip-conversion --skip-clustering --verbose
+python scripts/run_full_pipeline.py --config config_hln.json --skip-conversion --skip-clustering --content-mode embeddings --verbose
 ```
 
 Then remove limits for the full run.

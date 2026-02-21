@@ -18,7 +18,9 @@
       {"name": "Popularity", "enabled": true},
       {"name": "ItemKNN", "enabled": true},
       {"name": "EASE", "enabled": true},
-      {"name": "MultVAE", "enabled": true},
+      {"name": "MultVAE", "enabled": false, "params": {
+        "max_epochs": 12
+      }},
       {"name": "CB-ST", "enabled": true}
     ]
   }
