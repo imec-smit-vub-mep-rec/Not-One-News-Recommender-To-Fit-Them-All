@@ -1,0 +1,27 @@
+{
+    "dataset": {
+      "name": "ad",
+      "input_path": "s3://recosearch-nps-bucket-shared-with-smit/ad",
+      "format": "spark_csv",
+      "event_types": ["home_page_view", "article_page_view"],
+      "start_time_min": "2026-01-05T19:19:58.665Z",
+      "start_time_max": "2026-01-12T19:19:58.665Z"
+    },
+    "clustering": {
+      "k_selection_method": "elbow",
+      "legacy_features": true
+    },
+    "evaluation": {
+      "k_values": [10, 20, 50],
+      "content_mode": "embeddings",
+      "algorithms": [
+        {"name": "Popularity", "enabled": true},
+        {"name": "ItemKNN", "enabled": true},
+        {"name": "EASE", "enabled": true},
+        {"name": "MultVAE", "enabled": true, "params": {
+          "max_epochs": 20
+        }},
+        {"name": "CB-ST", "enabled": true}
+      ]
+    }
+  }
