@@ -412,6 +412,8 @@ python scripts/run_full_pipeline.py --config runs/ad_20260212_160426/config.json
 ```bash
 python scripts/run_full_pipeline.py --config config_hln.json --verbose --content-mode embeddings
 
+python scripts/run_full_pipeline.py --config config_ad.json --content-mode embeddings --verbose
+
 python scripts/run_full_pipeline.py --config config_hln.json --skip-conversion --skip-clustering --content-mode embeddings --verbose
 ```
 
