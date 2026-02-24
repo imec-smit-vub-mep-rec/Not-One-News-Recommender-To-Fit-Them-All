@@ -5,302 +5,174 @@ A modular framework for user clustering and recommendation evaluation in news re
 ## Overview
 
 This project provides tools for:
-1. **Data Conversion** - Converting various dataset formats (Adressa, EB-NeRD) to a standard format
-2. **User Clustering** - Clustering users based on behavioral features (categories, time patterns, activity)
-3. **Recommendation Evaluation** - Evaluating recommendation algorithms (Popularity, ItemKNN, EASE, MultVAE, Content-based) using RecPack
-
-## Datasets
-
-- Adressa: https://reclab.idi.ntnu.no/dataset/
-- EB-NeRD: https://recsys.eb.dk/ 
-
-### Example dataset installation in Sagemaker
-```bash
-wget https://ebnerd-dataset.s3.eu-west-1.amazonaws.com/ebnerd_large.zip
-unzip ebnerd_large.zip -d data/ebnerd/ebnerd_large/
-rm ebnerd_large.zip
-```
+1. **Data Conversion** – Converting various dataset formats to a standard schema
+2. **User Clustering** – Clustering users based on behavioral features (categories, time patterns, activity)
+3. **Recommendation Evaluation** – Evaluating algorithms (Popularity, ItemKNN, EASE, MultVAE, CB-ST) using RecPack
 
 ## Installation
 
 ```bash
-# Clone the repository
 git clone <repository-url>
 cd not-one-recommender-to-fit-them-all
-
-# Install dependencies
 pip install -r requirements.txt
 ```
 
-### Optional Dependencies
+**Optional dependencies:**
+- **RecPack** – Required for evaluation (`pip install recpack`)
+- **Sentence Transformers** – Required for CB-ST (`pip install sentence-transformers`)
+- **Annoy** – For approximate nearest neighbors (`pip install annoy`)
 
-- **RecPack**: Required for evaluation (`pip install recpack`)
-- **Sentence Transformers**: Required for content-based recommendations (`pip install sentence-transformers`)
-- **Annoy**: Required for approximate nearest neighbors (`pip install annoy`)
+---
 
-## Quick Start
+## Dataset Quick Reference
 
-### Full Pipeline
+| Dataset | Format | Download | Config |
+|---------|--------|----------|--------|
+| **EB-NeRD** | Parquet | [recsys.eb.dk](https://recsys.eb.dk/) | `config_ebnerd.json` |
+| **Adressa** | JSONL | [reclab.idi.ntnu.no](https://reclab.idi.ntnu.no/dataset/) | `config_adressa.json` |
+| **AD / HLN / VK** | S3 Spark CSV | Internal S3 bucket | `config_ad.json`, `config_hln.json`, `config_vk.json` |
 
-**Step 1:** (Optional) Combine EB-NeRD train + validation behaviors:
+---
+
+## Step-by-Step: EB-NeRD (SageMaker from Scratch)
+
+EB-NeRD is the Danish news dataset from Ekstra Bladet. Use this guide to run the full pipeline on SageMaker.
+
+### 1. Download the dataset
+
+Request access at [recsys.eb.dk](https://recsys.eb.dk/) and fill the form. Once approved, download:
+
+```bash
+# On SageMaker (or local)
+mkdir -p data/ebnerd
+wget https://ebnerd-dataset.s3.eu-west-1.amazonaws.com/ebnerd_large.zip
+unzip ebnerd_large.zip -d data/ebnerd/
+rm ebnerd_large.zip
+```
+
+If the zip extracts to a nested folder, ensure the final path is `data/ebnerd/ebnerd_large/` with `articles.parquet` and `train/` directly inside.
+
+**Expected structure after download:**
+```
+data/ebnerd/ebnerd_large/
+├── articles.parquet          # Shared across splits
+├── train/
+│   ├── behaviors.parquet
+│   └── history.parquet
+└── validation/
+    ├── behaviors.parquet
+    └── history.parquet
+```
+
+### 2. Combine behaviors (required)
+
+Merge train and validation behaviors into a single file:
+
 ```bash
 python scripts/combine_behaviors.py --input-dir data/ebnerd/ebnerd_large
 ```
 
-**Step 2:** Generate embeddings for CB-ST (required, run once per dataset):
+This creates `data/ebnerd/ebnerd_large/behaviors.parquet`.
+
+### 3. Generate embeddings for CB-ST (required if CB-ST enabled)
+
 ```bash
-python scripts/generate_embeddings.py --input-dir ./data/ebnerd/ebnerd_large
+python scripts/generate_embeddings.py --input-dir data/ebnerd/ebnerd_large
 ```
 
-**Step 3:** Run the complete pipeline:
-```bash
-# Using a preset dataset configuration
-python scripts/run_full_pipeline.py --dataset adressa --input-dir /path/to/adressa/data
+Creates `data/ebnerd/ebnerd_large/title_category_embeddings.parquet`. Use `--model intfloat/multilingual-e5-base` for faster runs; add `--batch-size 128` on GPU instances.
 
-# Using a custom configuration file
+### 4. Run the pipeline
+
+```bash
 python scripts/run_full_pipeline.py --config config_ebnerd.json
-
-# Legacy features with 4 clusters
-python scripts/run_full_pipeline.py --dataset ebnerd --input-dir ./data/ebnerd/ebnerd_large --legacy-features --n-clusters 4
-
-# With specific options
-python scripts/run_full_pipeline.py --dataset ebnerd --input-dir /data/ebnerd/ebnerd_small --n-clusters 5
 ```
 
-### Step-by-Step
-
-#### 1. Data Conversion
-
-Convert raw datasets to standard format:
+Or with CLI overrides:
 
 ```bash
-python scripts/run_conversion.py --dataset adressa --input-dir /path/to/raw --output-dir ./converted
+python scripts/run_full_pipeline.py --dataset ebnerd --input-dir data/ebnerd/ebnerd_large --legacy-features --n-clusters 4
 ```
 
-#### 2. User Clustering
+### SageMaker tips for EB-NeRD
 
-Cluster users based on behavior:
+| Dataset size | Instance | Notes |
+|--------------|----------|-------|
+| demo/small | ml.m5.xlarge (16 GB) | Quick tests |
+| large | ml.m5.4xlarge (64 GB) | Full pipeline |
+| large + CB-ST | ml.g4dn.xlarge (GPU) | Faster embeddings |
+
+**Option A – Run on instance with local data:** After downloading and preparing data on the SageMaker instance, run the pipeline with `input_path` pointing to the local directory (e.g. `/home/ec2-user/data/ebnerd/ebnerd_large`).
+
+**Option B – Use SageMaker Processing Job:** Upload data to S3, then create a Processing Job that mounts S3 to `/opt/ml/input/data/training`. Update config with `input_path: "/opt/ml/input/data/training"` and set `output` to `/opt/ml/output`. See `docs/sagemaker_config.md` for a full Processing Job example.
+
+---
+
+## Step-by-Step: Adressa (SageMaker from Scratch)
+
+Adressa is the Norwegian news dataset from NTNU Reclab.
+
+### 1. Download the dataset
+
+Download from [reclab.idi.ntnu.no/dataset](https://reclab.idi.ntnu.no/dataset/):
+
+- **Light 1 week:** [one_week.tar.gz](https://reclab.idi.ntnu.no/dataset/one_week.tar.gz) (~1.4 GB)
+- **Light 10 weeks:** [three_month.tar.gz](https://reclab.idi.ntnu.no/dataset/three_month.tar.gz) (~16 GB)
 
 ```bash
-python scripts/run_clustering.py \
-    --impressions ./converted/impressions.parquet \
-    --articles ./converted/articles.parquet \
-    --output-dir ./clustering_results
+# On SageMaker (or local)
+mkdir -p data/adressa
+wget https://reclab.idi.ntnu.no/dataset/one_week.tar.gz -O data/adressa/one_week.tar.gz
+tar -xzf data/adressa/one_week.tar.gz -C data/adressa/
+# Ensure JSONL files end up in data/adressa/one_week/ (rename extracted folder if needed)
+rm data/adressa/one_week.tar.gz
 ```
 
-#### 3. Evaluation
-
-Evaluate recommendation algorithms:
-
-```bash
-python scripts/run_evaluation.py \
-    --interactions ./converted/interactions.csv \
-    --clusters ./clustering_results/user_clusters.csv \
-    --content ./converted/articles_content.csv
+**Expected structure:**
 ```
-
-## Project Structure
-
-```
-not-one-recommender-to-fit-them-all/
-├── src/                          # Main source code
-│   ├── config/                   # Configuration management
-│   │   ├── settings.py           # Dataclass configs
-│   │   └── schema.py             # Data schema definitions
-│   ├── utils/                    # Utility functions
-│   │   ├── io.py                 # File I/O helpers
-│   │   ├── logging.py            # Logging setup
-│   │   └── session.py            # Session management
-│   ├── converters/               # Dataset converters
-│   │   ├── base.py               # Base converter class
-│   │   ├── adressa.py            # Adressa JSONL converter
-│   │   ├── ebnerd.py             # EB-NeRD Parquet converter
-│   │   └── generic.py            # Generic configurable converter
-│   ├── preprocessing/            # Data preprocessing
-│   │   ├── validators.py         # Data validation
-│   │   ├── cleaners.py           # Data cleaning
-│   │   └── transformers.py       # Data transformation
-│   ├── clustering/               # User clustering
-│   │   ├── feature_engineering.py  # Feature extraction
-│   │   ├── clustering.py         # K-Means clustering
-│   │   └── visualization.py      # Cluster visualization
-│   └── evaluation/               # RecPack evaluation
-│       ├── recpack_pipeline.py   # Evaluation pipeline
-│       ├── analysis.py           # Results analysis
-│       └── algorithms/           # Custom algorithms
-│           └── content_based.py  # Content-based recommender
-├── scripts/                      # CLI scripts
-│   ├── run_full_pipeline.py      # Complete pipeline
-│   ├── run_conversion.py         # Data conversion only
-│   ├── run_clustering.py         # Clustering only
-│   └── run_evaluation.py         # Evaluation only
-├── tests/                        # Unit tests
-├── requirements.txt              # Python dependencies
-└── README.md                     # This file
-```
-
-## Data Format
-
-### Input Data Requirements
-
-The converters expect specific file structures for each dataset type:
-
-#### Adressa Dataset (`data/adressa/`)
-
-```
-data/adressa/
-├── 20170101.jsonl       # Daily interaction files (JSONL format)
-├── 20170102.jsonl       # One file per day
-├── 20170103.jsonl
+data/adressa/one_week/
+├── 20170101.jsonl
+├── 20170102.jsonl
 ├── ...
 └── 20170107.jsonl
 ```
 
-**JSONL file format** (one JSON object per line):
-```json
-{"userId": "abc123", "time": 1483228800, "url": "https://www.adressa.no/nyheter/article123.html", "title": "Article Title", "id": "article123"}
+Each JSONL line: `{"userId": "...", "time": 1483228800, "url": "...", "title": "...", "id": "..."}`
+
+### 2. Generate embeddings for CB-ST (required if CB-ST enabled)
+
+```bash
+python scripts/generate_embeddings.py --input-dir data/adressa/one_week
 ```
 
-Expected fields in each JSONL line:
-| Field | Type | Description |
-|-------|------|-------------|
-| `userId` | string | Anonymous user identifier |
-| `time` | int | Unix timestamp (seconds) |
-| `url` | string | Full article URL |
-| `title` | string | Article title (optional) |
-| `id` | string | Article identifier (optional, extracted from URL if missing) |
+### 3. Run the pipeline
 
-**Notes:**
-- Homepage views (`https://www.adressa.no/`) are filtered out
-- Category is extracted from URL path (e.g., `/nyheter/` → `nyheter`)
-- Sessions are detected using 30-minute inactivity threshold
-
-#### EB-NeRD Dataset (`data/ebnerd/`)
-
-```
-data/ebnerd/
-├── articles.parquet     # Article metadata
-├── behaviors.parquet    # User behaviors/impressions
-└── (optional subdirectories)
-    ├── train/
-    │   ├── articles.parquet
-    │   └── behaviors.parquet
-    └── validation/
-        ├── articles.parquet
-        └── behaviors.parquet
+```bash
+python scripts/run_full_pipeline.py --config config_adressa.json
 ```
 
-**articles.parquet** columns:
-| Column | Type | Description |
-|--------|------|-------------|
-| `article_id` | int/string | Unique article identifier |
-| `title` | string | Article title |
-| `category` or `category_str` | string | Article category |
-| `published_time` | datetime | Publication timestamp (optional) |
-| `subtitle` | string | Article subtitle (optional) |
-| `body` | string | Article body text (optional) |
+Or:
 
-**behaviors.parquet** columns:
-| Column | Type | Description |
-|--------|------|-------------|
-| `user_id` | int/string | User identifier |
-| `article_id` or `article_id_fixed` | int/string | Viewed article |
-| `impression_time` | datetime/int | Interaction timestamp |
-| `read_time` | float | Time spent reading (optional) |
-| `scroll_percentage` | float | Scroll depth (optional) |
-| `impression_id` | string | Unique impression identifier (optional) |
-
-**Notes:**
-- Parquet or CSV formats are supported
-- The converter searches subdirectories if files aren't in root
-- Column names are mapped automatically to standard format
-
-### Standard Schema
-
-The pipeline uses a standardized data format (see [general_data_format.md](general_data_format.md)):
-
-**Articles** (`articles.parquet`):
-- `article_id`: Unique article identifier
-- `title`: Article title
-- `category_str`: Article category
-
-**Impressions** (`impressions.parquet`):
-- `user_id`: Unique user identifier
-- `article_id`: Article that was viewed
-- `impression_time`: Unix timestamp (milliseconds)
-- `session_id`: Session identifier
-
-**Interactions** (`interactions.csv`):
-- `user_id`: User identifier
-- `article_id`: Article identifier
-- `impression_time`: Unix timestamp (seconds)
-
-## Configuration
-
-Create a JSON configuration file:
-
-```json
-{
-  "dataset": {
-    "name": "my_dataset",
-    "type": "generic",
-    "input_dir": "/path/to/data",
-    "column_mapping": {
-      "user_id": "userId",
-      "article_id": "itemId",
-      "impression_time": "timestamp"
-    }
-  },
-  "clustering": {
-    "n_clusters": null,
-    "k_selection_method": "elbow",
-    "min_impressions_per_user": 5
-  },
-  "evaluation": {
-    "algorithms": [
-      {"name": "Popularity", "enabled": true},
-      {"name": "ItemKNN", "enabled": true},
-      {"name": "EASE", "enabled": true},
-      {
-        "name": "MultVAE",
-        "enabled": false,
-        "params": {
-          "batch_size": 500,
-          "max_epochs": 200,
-          "learning_rate": 0.0001,
-          "dim_bottleneck_layer": 200,
-          "dim_hidden_layer": 600,
-          "max_beta": 0.2,
-          "anneal_steps": 200000,
-          "dropout": 0.5,
-          "validation_sample_size": 20000
-        }
-      },
-      {"name": "CB-ST", "enabled": true}
-    ],
-    "k_values": [10, 20, 50]
-  }
-}
+```bash
+python scripts/run_full_pipeline.py --dataset adressa --input-dir data/adressa/one_week --legacy-features --n-clusters 3
 ```
 
-**Enabling/disabling algorithms:** Add an `algorithms` array under `evaluation`. Each entry needs `name` and `enabled` (true/false). Only algorithms with `enabled: true` are run. Example: set `"enabled": true` for MultVAE to include it (it is disabled by default because it is slower).
+### SageMaker tips for Adressa
 
-### Preset Configurations
+- **1 week:** ml.m5.large or ml.m5.xlarge
+- **10 weeks:** ml.m5.4xlarge
+- No `combine_behaviors` step needed (Adressa uses single JSONL files)
 
-- `ad`: Large AD dataset exported by Spark (S3 partitioned CSV)
-- `hln`: HLN dataset, same S3 Spark CSV format as ad
-- `vk`: VK dataset, same S3 Spark CSV format as ad
-- `adressa`: Norwegian news dataset (Adressa)
-- `ebnerd`: Danish news dataset (EB-NeRD/Ekstra Bladet)
+---
 
-## Running Large AD Data on SageMaker (S3)
+## Step-by-Step: AD / HLN / VK (SageMaker from Scratch)
 
-This section covers the high-memory SageMaker workflow for the Spark-written AD dataset.
+AD, HLN, and VK use the same Spark CSV format on S3. Data is typically exported from production systems.
 
-### Expected S3 Layout
+### 1. Expected S3 layout
 
 ```
-s3://<bucket>/<prefix>/ad/
+s3://<bucket>/<prefix>/<dataset>/
 ├── article_metadata.csv
 └── impressions/
     ├── event_type=home_page_view/
@@ -309,45 +181,18 @@ s3://<bucket>/<prefix>/ad/
         └── part-*.csv
 ```
 
-The converter reads the partition root (`impressions/`) with `awswrangler` and automatically includes the `event_type` partition column.
+`article_metadata.csv` must include `bert_embedding` for CB-ST (no separate `generate_embeddings.py` step).
 
-### SageMaker Prerequisites
+### 2. IAM permissions
 
-#### 1) IAM permissions
-
-Your SageMaker execution role needs:
+SageMaker execution role needs:
 - `s3:ListBucket` on the dataset bucket/prefix
 - `s3:GetObject` on dataset objects
-- Optional: `s3:PutObject` if you sync results back to S3
+- Optional: `s3:PutObject` to sync results back
 
-#### 2) Instance sizing
+### 3. Update config
 
-For very large CSV exports, start with high-memory instances:
-- Recommended start: `ml.r5.8xlarge` (256 GiB RAM)
-- If out-of-memory: `ml.r5.16xlarge` (512 GiB RAM)
-- EBS volume: 200-500 GB (depending on run artifacts)
-
-#### 3) Install dependencies
-
-```bash
-pip install -r requirements.txt
-```
-
-`awswrangler` is required for S3 partitioned reads.
-
-### Quick Run (Preset Mode)
-
-```bash
-python scripts/run_full_pipeline.py \
-  --dataset ad \
-  --input-dir s3://<bucket>/<prefix>/ad \
-  --legacy-features \
-  --n-clusters 4
-```
-
-### Reproducible Run (Config File Mode)
-
-Create `config_ad_s3.json`:
+Create or edit `config_ad.json` (or `config_hln.json`, `config_vk.json`):
 
 ```json
 {
@@ -360,38 +205,34 @@ Create `config_ad_s3.json`:
     "start_time_max": null
   },
   "clustering": {
-    "n_clusters": 4,
     "k_selection_method": "elbow",
     "legacy_features": true
   },
   "evaluation": {
-    "k_values": [10, 20, 50]
+    "k_values": [10, 20, 50],
+    "content_mode": "embeddings"
   }
 }
 ```
 
-Run:
+Use `start_time_min` and `start_time_max` for smoke tests (e.g. one week).
+
+### 4. Run the pipeline
 
 ```bash
-python scripts/run_full_pipeline.py --dataset ad --config config_ad_s3.json
+python scripts/run_full_pipeline.py --config config_ad.json
 ```
 
-```bash
-# HLN dataset (same S3 layout as ad)
-python scripts/run_full_pipeline.py --dataset hln --config config_hln.json --skip-evaluation
+### SageMaker tips for AD/HLN/VK
 
-# VK dataset (same S3 layout as ad)
-python scripts/run_full_pipeline.py --dataset vk --config config_vk.json
-```
+| Scale | Instance | Notes |
+|-------|----------|-------|
+| Smoke test | ml.m5.xlarge | Use `start_time_min`/`max` to limit data |
+| Medium | ml.m5.4xlarge | 64 GB RAM |
+| Large | ml.r5.8xlarge | 256 GB RAM |
+| Very large | ml.r5.16xlarge | 512 GB RAM |
 
-### Smoke Test Before Full Run (Recommended)
-
-Start with a small run first:
-1. Restrict to one partition via `event_types` (for example only `article_page_view`)
-2. Restrict time range with `start_time_min` and `start_time_max`
-3. Use fewer clusters
-4. Skip evaluation initially:
-
+**Smoke test (recommended first):**
 ```bash
 python scripts/run_full_pipeline.py \
   --dataset ad \
@@ -399,221 +240,127 @@ python scripts/run_full_pipeline.py \
   --n-clusters 3 \
   --skip-evaluation
 ```
-or skip clustering
-```bash
-python scripts/run_full_pipeline.py --config runs/ad_20260212_160426/config.json --skip-conversion --skip-clustering --content-mode embeddings --verbose
-```
-
-**Specifying clusters (when using `--skip-clustering`):** The pipeline loads `user_clusters.parquet` from the session directory `runs/<run_id>/`. Use one of:
-
-1. **`--run-id`** – point to an existing run:
-   ```bash
-   python scripts/run_full_pipeline.py --config config_hln.json --run-id hln_20260216_130931 --skip-conversion --skip-clustering --verbose
-   ```
-
-2. **Config from existing run** – use that run’s `config.json` (it contains the run_id):
-   ```bash
-   python scripts/run_full_pipeline.py --config runs/hln_20260219_131303/config.json --skip-conversion --skip-clustering --content-mode embeddings --verbose
-   ```
-
-3. **`session.run_id` in config** – add to your JSON:
-   ```json
-   "session": { "run_id": "hln_20260216_130931" }
-   ```
-
-```bash
-python scripts/run_full_pipeline.py --config config_hln.json --verbose --content-mode embeddings
-
-python scripts/run_full_pipeline.py --config config_vk.json --content-mode embeddings --verbose
-
-python scripts/run_full_pipeline.py --config config_hln.json --skip-conversion --skip-clustering --content-mode embeddings --verbose
-```
 
 Then remove limits for the full run.
 
-### Embeddings for CB-ST on AD
+### Embeddings for CB-ST on AD/HLN/VK
 
-AD includes `bert_embedding` in `article_metadata.csv`.
-During conversion, the pipeline parses these embeddings and writes:
+AD includes `bert_embedding` in `article_metadata.csv`. The converter creates `runs/<run_id>/data/title_category_embeddings.parquet` automatically. No `generate_embeddings.py` step is required.
 
-`runs/<run_id>/data/title_category_embeddings.parquet`
+---
 
-Evaluation uses this session-local embeddings file first, so no separate `generate_embeddings.py` step is required for AD.
+## Configuration
 
-### Outputs and Optional S3 Sync
+### Config file structure
 
-By default outputs are written locally under:
+```json
+{
+  "dataset": {
+    "name": "ebnerd",
+    "input_path": "data/ebnerd/ebnerd_large"
+  },
+  "clustering": {
+    "k_selection_method": "elbow",
+    "legacy_features": true
+  },
+  "evaluation": {
+    "k_values": [10, 20, 50],
+    "algorithms": [
+      {"name": "Popularity", "enabled": true},
+      {"name": "ItemKNN", "enabled": true},
+      {"name": "EASE", "enabled": true},
+      {"name": "MultVAE", "enabled": true, "params": {"max_epochs": 20}},
+      {"name": "CB-ST", "enabled": true}
+    ]
+  }
+}
+```
 
-`runs/<dataset>_<timestamp>/`
+### Preset configs
 
-Optional sync back to S3:
+| Preset | Description |
+|--------|-------------|
+| `ebnerd` | Danish news (EB-NeRD/Ekstra Bladet) |
+| `adressa` | Norwegian news (Adressa) |
+| `ad` | AD dataset, S3 Spark CSV |
+| `hln` | HLN dataset, same format as ad |
+| `vk` | VK dataset, same format as ad |
 
+---
+
+## Algorithms
+
+- **Popularity** – Most popular items
+- **ItemKNN** – Item-based k-nearest neighbors
+- **EASE** – Embarrassingly Shallow Autoencoders
+- **MultVAE** – Variational autoencoder (RecPack)
+- **CB-ST** – Sentence Transformer embeddings (requires pre-calculated embeddings for EB-NeRD/Adressa)
+
+**CB-ST:** For EB-NeRD and Adressa, run `generate_embeddings.py` before the pipeline. For AD/HLN/VK, embeddings come from `article_metadata.csv` during conversion.
+
+**Apple Silicon:** On M1/M2/M3/M4 Macs, Annoy may return only 1 neighbor. Use `CB-ST-sklearn` instead of `CB-ST`.
+
+---
+
+## Evaluation
+
+- **Scenario:** LastItemPrediction (last interaction held out for testing)
+- **Metrics:** NDCG@K, Recall@K, Precision@K, Coverage@K, Gini@K, topic-level diversity
+- **Filtering:** Session bot filter (>50 interactions/session), min 5 article interactions per user
+
+---
+
+## Output
+
+Results are saved under `runs/<dataset>_<timestamp>/`:
+
+```
+runs/ebnerd_20241215_120000/
+├── config.json
+├── articles.parquet, impressions.parquet, interactions.csv
+├── user_clusters.parquet
+├── evaluation_results/
+│   ├── cluster_0_results.csv
+│   └── ...
+└── evaluation_report.txt
+```
+
+**Sync to S3:**
 ```bash
 aws s3 sync runs/ s3://<bucket>/<results-prefix>/runs/
 ```
 
-## Algorithms
+---
 
-### Collaborative Filtering
-- **Popularity**: Recommends most popular items
-- **ItemKNN**: Item-based k-nearest neighbors
-- **EASE**: Embarrassingly Shallow Autoencoders
-- **MultVAE**: Variational autoencoder for collaborative filtering (RecPack implementation)
-
-#### MultVAE notes
-
-- `MultVAE` uses RecPack's `fit(X, validation_data=(validation_in, validation_out))` API.
-- In this pipeline, sensible defaults are applied if not provided in config:
-  - `predict_topK = max(k_values)`
-  - `stop_early = true`
-  - `max_iter_no_change = 5`
-  - `stopping_criterion = "ndcg"`
-  - `seed = evaluation seed`
-- Override any of these in `evaluation.algorithms[].params`.
-
-### Content-Based
-- **CB-ST**: Sentence Transformer embeddings with Annoy approximate nearest neighbors
-
-#### Pre-calculated Embeddings (REQUIRED for CB-ST)
-
-CB-ST **requires** pre-calculated embeddings. Generate them before running the pipeline:
-
-```bash
-# Generate embeddings (run once per dataset)
-python scripts/generate_embeddings.py --input-dir ./data/ebnerd/ebnerd_large
-
-# This creates: ./data/ebnerd/ebnerd_large/title_category_embeddings.parquet
-```
-
-The embedding format is `{category}: {title}` matching the legacy content-based approach.
-
-**Generated file structure:**
-```
-data/ebnerd/ebnerd_large/
-├── articles.parquet
-├── behaviors.parquet
-└── title_category_embeddings.parquet  # Generated embeddings (REQUIRED)
-```
-
-**Schema for `title_category_embeddings.parquet`:**
-| Column | Type | Description |
-|--------|------|-------------|
-| `article_id` | Int32 | Article identifier |
-| `embedding` | List[Float] | Embedding vector (1024-dim for e5-large) |
-
-If the embeddings file is missing and CB-ST is enabled, the pipeline will throw an error with instructions.
-
-#### Apple Silicon Warning ⚠️
-
-CB-ST uses the **Annoy** backend by default for fast approximate nearest neighbor search. However, **Annoy has a known bug on Apple Silicon (M1/M2/M3/M4 Macs)** where it may only return 1 neighbor regardless of how many are requested.
-
-If you experience poor CB-ST results on Apple Silicon, you can switch to the sklearn backend by modifying the algorithm configuration or using `CB-ST-sklearn` instead of `CB-ST`.
-
-## Evaluation Methodology
-
-### Scenario: LastItemPrediction
-
-The pipeline uses RecPack's **LastItemPrediction** scenario (matching legacy behavior):
-- For each user, the **last interaction** is held out for testing
-- All **earlier interactions** are used for training
-- This evaluates how well algorithms predict what a user will read next based on their history
-
-### Metrics (Per-K)
-
-For each configured value in `evaluation.k_values`, the pipeline reports:
-
-- `NDCGK_<k>`, `RecallK_<k>`, `PrecisionK_<k>`: ranking quality at cutoff `k`
-- `CoverageK_<k>`: catalog coverage at `k`, computed as unique recommended items divided by total available items
-- `GiniK_<k>`: inequality of item exposure at `k`, computed from recommendation frequency across items
-- `CoverageK_topics_<k>`, `GiniK_topics_<k>`: topic-level diversity (when `articles_cleaned.parquet` with `categories` is available)
-  - Uses the `categories` column (array of strings); falls back to `category_str` if missing
-  - Multi-topic items split exposure across all their categories
-  - Unknown items (no valid categories) are excluded from topic metrics
-
-Interpretation:
-- Higher `CoverageK_<k>` means recommendations are spread over more of the catalog
-- Lower `GiniK_<k>` means item exposure is more evenly distributed (less concentration on a few items)
-- `CoverageK_topics_<k>`: fraction of topics (categories) that receive at least one recommendation
-- `GiniK_topics_<k>`: inequality of topic exposure (lower = more even spread across topics)
-
-### Data Filtering (Legacy Parity)
-
-To match the legacy pipeline, the following filters are applied:
-
-1. **Session Bot Filter**: Sessions with >50 interactions are removed (likely bots)
-2. **Minimum User Activity**: Users with <5 article interactions are filtered for RecPack evaluation
-3. **Empty Article Removal**: Impressions without valid article_id are removed for evaluation (but kept for clustering to capture homepage behavior)
-
-The session filter can be disabled by passing `max_impressions_per_session=None` to the `DataCleaner`.
-
-### Legacy vs Current Evaluation Design
-
-The pipeline keeps legacy-compatible inputs and reporting, but the RecPack evaluation design is intentionally modernized in a few places:
-
-- **Per-cluster training (current)**: models are trained and evaluated separately inside each cluster.
-- **Post-hoc cluster slicing (legacy)**: a single global model is trained, then results are analyzed by cluster.
-- **Hyperparameter search**: legacy used RecPack grid search for `ItemKNN` and `EASE`; current pipeline uses configured defaults.
-- **Scenario coverage**: current pipeline focuses on `LastItemPrediction`; legacy scripts also contained `WeakGeneralization` and `Timed` experiments.
-- **History cap**: legacy `LastItemPrediction` used `n_most_recent_in=30`; current pipeline uses all available user history unless you add a custom cap.
-
-These differences mainly affect comparability of absolute metric values with old experiments. Cluster profiles and feature semantics remain aligned with the legacy clustering behavior.
-
-## Output
-
-Results are saved to timestamped session directories:
+## Project Structure
 
 ```
-runs/
-└── dataset_20241215_120000/
-    ├── config.json           # Configuration used
-    ├── articles.parquet      # Converted articles
-    ├── impressions.parquet   # Converted impressions
-    ├── interactions.csv      # RecPack interactions
-    ├── articles_content.csv  # Content for CB algorithm
-    ├── user_features.parquet # Extracted features
-    ├── user_clusters.csv     # Cluster assignments
-    ├── visualizations/       # Cluster plots
-    │   ├── elbow_curve.png
-    │   ├── cluster_distribution.png
-    │   └── cluster_profiles.png
-    ├── evaluation_results/   # Per-cluster results
-    │   ├── cluster_0_results.csv
-    │   ├── topic_report_cluster_0.xlsx  # Topic popularity, one tab per algorithm
-    │   └── ...
-    └── evaluation_report.txt # Summary report
+not-one-recommender-to-fit-them-all/
+├── src/
+│   ├── config/           # settings.py, schema.py
+│   ├── converters/        # adressa.py, ebnerd.py, generic.py
+│   ├── preprocessing/     # validators, cleaners, transformers
+│   ├── clustering/        # feature engineering, K-Means
+│   └── evaluation/       # RecPack pipeline, algorithms
+├── scripts/
+│   ├── run_full_pipeline.py
+│   ├── run_conversion.py, run_clustering.py, run_evaluation.py
+│   ├── combine_behaviors.py    # EB-NeRD only
+│   └── generate_embeddings.py  # EB-NeRD, Adressa
+├── config_ebnerd.json, config_adressa.json, config_ad.json, ...
+└── requirements.txt
 ```
+
+---
 
 ## Development
 
-### Running Tests
-
 ```bash
-# Run all tests
 pytest tests/ -v
-
-# Run with coverage
 pytest tests/ --cov=src --cov-report=html
 ```
 
-### Adding a New Converter
-
-1. Create a new file in `src/converters/`
-2. Inherit from `BaseConverter`
-3. Implement `convert_articles()` and `convert_impressions()`
-4. Register in `src/converters/__init__.py`
-
-```python
-from .base import BaseConverter
-
-class MyDatasetConverter(BaseConverter):
-    def convert_articles(self):
-        # Your conversion logic
-        pass
-    
-    def convert_impressions(self):
-        # Your conversion logic
-        pass
-```
+---
 
 ## License
 
@@ -621,39 +368,10 @@ class MyDatasetConverter(BaseConverter):
 
 ## Citation
 
-If you use this code, please cite:
-
 ```bibtex
 @misc{ricon-analysis,
   title={RICON Analysis Pipeline},
   year={2024},
   url={repository-url}
 }
-```
-
-
-## Command dump
-```bash
-# Step 0: Combine behaviors if needed (EB-NeRD only)
-python scripts/combine_behaviors.py --input-dir data/ebnerd/ebnerd_large
-
-# Step 1: Generate embeddings (REQUIRED for CB-ST) - run once per dataset
-python scripts/generate_embeddings.py --input-dir ./data/ebnerd/ebnerd_large
-
-# Step 2: Run full pipeline
-python scripts/run_full_pipeline.py --dataset ebnerd --input-dir ./data/ebnerd/ebnerd_large --legacy-features --n-clusters 4
-
-# Small dataset test
-python scripts/run_full_pipeline.py --dataset ebnerd --input-dir ./data/ebnerd/ebnerd_small --legacy-features
-
-# Generate embeddings with different model
-python scripts/generate_embeddings.py --input-dir ./data/ebnerd/ebnerd_large --model intfloat/multilingual-e5-base
-
-# Generate embeddings with GPU (larger batch size)
-python scripts/generate_embeddings.py --input-dir ./data/ebnerd/ebnerd_large --batch-size 128
-```
-
-```bash
-python scripts/generate_embeddings.py --input-dir ./data/adressa/one_week
-python scripts/run_full_pipeline.py --dataset adressa --input-dir ./data/adressa/one_week --legacy-features --n-clusters 3
 ```
