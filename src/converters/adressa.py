@@ -6,7 +6,6 @@ Based on the original 1.adressa_to_ekstra_format.py script.
 """
 
 import re
-import uuid
 import glob
 import gc
 from pathlib import Path
@@ -102,35 +101,58 @@ class AdressaConverter(BaseConverter):
         # Clear category for homepage URLs
         chunk.loc[chunk['is_homepage'], 'category_str'] = ''
         
-        # Vectorized session assignment
-        # Compute time difference within each user
-        chunk['time_diff'] = chunk.groupby('userId')['time'].diff()
-        
-        # Check for sessionStart flag
-        session_start_flag = chunk.get('sessionStart', pd.Series(False, index=chunk.index))
-        if isinstance(session_start_flag, pd.Series):
-            session_start_flag = session_start_flag.fillna(False)
+        # Session assignment with cross-chunk continuity.
+        # Uses _user_sessions to continue sessions when a user's activity spans chunk boundaries
+        # within the timeout window (matches legacy 1.adressa_to_ekstra_format.py behavior).
+        session_start = chunk.get('sessionStart', pd.Series(False, index=chunk.index))
+        if isinstance(session_start, pd.Series):
+            session_start = session_start.fillna(False)
         else:
-            session_start_flag = pd.Series(False, index=chunk.index)
-        
-        # New session when: first row for user (NaN diff), timeout exceeded, or sessionStart flag
-        new_session_mask = (
-            chunk['time_diff'].isna() |  # First row for this user
-            (chunk['time_diff'] > self.config.session_timeout_seconds) |  # Timeout
-            session_start_flag  # Explicit session start
-        )
-        
-        # Generate session IDs: cumulative sum of new_session creates groups
-        # Then combine with userId to make unique session IDs
-        chunk['session_group'] = new_session_mask.groupby(chunk['userId']).cumsum()
-        chunk['session_id'] = chunk['userId'].astype(str) + '_' + chunk['session_group'].astype(str)
-        
-        # Update user sessions state for continuity across chunks
+            session_start = pd.Series(False, index=chunk.index)
+
+        timeout = self.config.session_timeout_seconds
+        session_ids = pd.Series(index=chunk.index, dtype=object)
+
         for user_id in chunk['userId'].unique():
-            user_data = chunk[chunk['userId'] == user_id]
-            last_time = user_data['time'].iloc[-1]
-            last_session = user_data['session_id'].iloc[-1]
-            self._user_sessions[user_id] = (last_time, last_session)
+            user_mask = chunk['userId'] == user_id
+            user_indices = chunk.loc[user_mask].sort_values('time').index.tolist()
+
+            last_time, last_session = self._user_sessions.get(user_id, (None, None))
+            last_group = 0
+            if last_session and '_' in str(last_session):
+                try:
+                    last_group = int(str(last_session).rsplit('_', 1)[-1])
+                except (ValueError, IndexError):
+                    pass
+            next_group = last_group + 1
+            current_session = None
+            prev_time = None
+
+            for idx in user_indices:
+                row_time = chunk.at[idx, 'time']
+                row_session_start = session_start.at[idx] if idx in session_start.index else False
+
+                if (
+                    last_time is not None
+                    and current_session is None
+                    and not row_session_start
+                    and (row_time - last_time) <= timeout
+                ):
+                    current_session = last_session
+                elif (
+                    prev_time is None
+                    or (row_time - prev_time) > timeout
+                    or row_session_start
+                ):
+                    current_session = f"{user_id}_{next_group}"
+                    next_group += 1
+
+                session_ids.at[idx] = current_session
+                prev_time = row_time
+
+            self._user_sessions[user_id] = (prev_time, current_session)
+
+        chunk['session_id'] = session_ids
         
         # Process article information (vectorized aggregation)
         non_homepage = chunk[~chunk['is_homepage']].copy()
