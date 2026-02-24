@@ -1,4 +1,4 @@
-# RICON Analysis Pipeline
+# News Recommender Analysis Pipeline
 
 A modular framework for user clustering and recommendation evaluation in news recommendation systems.
 
@@ -8,6 +8,41 @@ This project provides tools for:
 1. **Data Conversion** – Converting various dataset formats to a standard schema
 2. **User Clustering** – Clustering users based on behavioral features (categories, time patterns, activity)
 3. **Recommendation Evaluation** – Evaluating algorithms (Popularity, ItemKNN, EASE, MultVAE, CB-ST) using RecPack
+
+### Pipeline Flow
+
+```mermaid
+flowchart TB
+    RAW[Raw Data<br/>EB-NeRD / Adressa / AD-HLN-VK] --> C1[1. Data Conversion]
+    C1 --> C2[2. Preprocessing]
+    C2 --> C3[3. User Clustering]
+    C3 --> C4[4. RecPack Evaluation]
+    C4 --> RES[Results]
+
+    C1 -.->|output| O1[articles.parquet<br/>impressions.parquet]
+    C2 -.->|output| O2[interactions.csv<br/>articles_content.csv]
+    C3 -.->|output| O3[user_clusters.parquet]
+    C4 -.->|output| O4[evaluation_results/<br/>evaluation_report.txt]
+```
+
+**Optional steps before running the pipeline:**
+- **EB-NeRD:** `combine_behaviors.py` (merge train/validation) → `generate_embeddings.py` (if CB-ST)
+- **Adressa:** `generate_embeddings.py` (if CB-ST)
+- **AD/HLN/VK:** Embeddings from `article_metadata.csv` during conversion
+
+| Step | Description |
+|------|--------------|
+| **1. Data Conversion** | Convert raw format (Parquet, JSONL, Spark CSV) → standard schema |
+| **2. Preprocessing** | Validate, clean, create interactions (article-only) and article content. See details below. |
+| **3. User Clustering** | Extract behavioral features, K-Means clustering, assign cluster IDs |
+| **4. RecPack Evaluation** | Run algorithms per cluster, compute NDCG@K, Recall@K, etc. |
+
+**Preprocessing details:**
+- **Validation** – Check articles and impressions against expected schema (required columns, types, duplicates)
+- **Cleaning** – Remove duplicate impressions; filter out bot-like sessions (>50 impressions/session); normalize category strings (strip, lowercase)
+- **Clustering data** – Keep all users and homepage views (no user filtering); homepage behavior is a clustering signal
+- **interactions.csv** – Extract article-only rows (user_id, article_id, impression_time) for RecPack evaluation
+- **articles_content.csv** – Combine category + title (or + body in full mode) for CB-ST; skipped in embeddings-only mode
 
 ## Installation
 
