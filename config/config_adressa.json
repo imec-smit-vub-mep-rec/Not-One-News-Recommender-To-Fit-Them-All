@@ -1,0 +1,27 @@
+{
+  "dataset": {
+    "name": "adressa",
+    "input_path": "data/adressa/one_week"
+  },
+  "clustering": {
+    "k_selection_method": "elbow",
+    "legacy_features": true
+  },
+  "evaluation": {
+    "k_values": [10, 20, 50],
+    "content_mode": "embeddings",
+    "algorithms": [
+      { "name": "Popularity", "enabled": true },
+      { "name": "ItemKNN", "enabled": true },
+      { "name": "EASE", "enabled": true },
+      {
+        "name": "MultVAE",
+        "enabled": true,
+        "params": {
+          "max_epochs": 20
+        }
+      },
+      { "name": "CB-ST", "enabled": true }
+    ]
+  }
+}
