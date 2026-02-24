@@ -1,0 +1,22 @@
+{
+    "dataset": {
+      "name": "ebnerd",
+      "input_path": "data/ebnerd/ebnerd_large"
+    },
+    "clustering": {
+      "k_selection_method": "elbow",
+      "legacy_features": true
+    },
+    "evaluation": {
+      "k_values": [10, 20, 50],
+      "algorithms": [
+        {"name": "Popularity", "enabled": true},
+        {"name": "ItemKNN", "enabled": true},
+        {"name": "EASE", "enabled": true},
+        {"name": "MultVAE", "enabled": true, "params": {
+          "max_epochs": 20
+        }},
+        {"name": "CB-ST", "enabled": true}
+      ]
+    }
+  }

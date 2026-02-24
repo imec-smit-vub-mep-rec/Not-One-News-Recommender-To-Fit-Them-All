@@ -9,6 +9,18 @@ This project provides tools for:
 2. **User Clustering** - Clustering users based on behavioral features (categories, time patterns, activity)
 3. **Recommendation Evaluation** - Evaluating recommendation algorithms (Popularity, ItemKNN, EASE, MultVAE, Content-based) using RecPack
 
+## Datasets
+
+- Adressa: https://reclab.idi.ntnu.no/dataset/
+- EB-NeRD: https://recsys.eb.dk/ 
+
+### Example dataset installation in Sagemaker
+```bash
+wget https://ebnerd-dataset.s3.eu-west-1.amazonaws.com/ebnerd_large.zip
+unzip ebnerd_large.zip -d data/ebnerd/ebnerd_large/
+rm ebnerd_large.zip
+```
+
 ## Installation
 
 ```bash
@@ -46,7 +58,7 @@ python scripts/generate_embeddings.py --input-dir ./data/ebnerd/ebnerd_large
 python scripts/run_full_pipeline.py --dataset adressa --input-dir /path/to/adressa/data
 
 # Using a custom configuration file
-python scripts/run_full_pipeline.py --config my_config.json
+python scripts/run_full_pipeline.py --config config_ebnerd.json
 
 # Legacy features with 4 clusters
 python scripts/run_full_pipeline.py --dataset ebnerd --input-dir ./data/ebnerd/ebnerd_large --legacy-features --n-clusters 4
@@ -412,7 +424,7 @@ python scripts/run_full_pipeline.py --config runs/ad_20260212_160426/config.json
 ```bash
 python scripts/run_full_pipeline.py --config config_hln.json --verbose --content-mode embeddings
 
-python scripts/run_full_pipeline.py --config config_ad.json --content-mode embeddings --verbose
+python scripts/run_full_pipeline.py --config config_vk.json --content-mode embeddings --verbose
 
 python scripts/run_full_pipeline.py --config config_hln.json --skip-conversion --skip-clustering --content-mode embeddings --verbose
 ```
