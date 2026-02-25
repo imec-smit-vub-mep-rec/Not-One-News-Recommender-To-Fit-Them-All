@@ -23,15 +23,15 @@
           "normalize_X": [true, false]
         }
       },
-      { "name": "EASE", "enabled": false, "grid": { "l2": [1, 10, 100, 1000] } },
+      { "name": "EASE", "enabled": true, "grid": { "l2": [1, 10, 100, 1000] } },
       {
         "name": "MultVAE",
-        "enabled": false,
+        "enabled": true,
         "params": {
           "max_epochs": 20
         }
       },
-      { "name": "CB-ST", "enabled": false }
+      { "name": "CB-ST", "enabled": true }
     ]
   }
 }

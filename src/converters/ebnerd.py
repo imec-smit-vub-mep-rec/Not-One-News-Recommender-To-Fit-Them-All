@@ -174,12 +174,16 @@ class EBNeRDConverter(BaseConverter):
             self.logger.info("Generating session IDs...")
             df = self._generate_session_ids(df)
         
-        # Handle is_subscriber (may come from is_sso_user in EB-NeRD)
-        if 'is_subscriber' not in df.columns:
+        # Handle is_logged_in (derived from is_sso_user when available)
+        if 'is_logged_in' not in df.columns:
             if 'is_sso_user' in df.columns:
-                df['is_subscriber'] = df['is_sso_user']
+                df['is_logged_in'] = df['is_sso_user']
             else:
-                df['is_subscriber'] = False
+                df['is_logged_in'] = False
+
+        # Handle is_subscriber (may come from source; fallback to False)
+        if 'is_subscriber' not in df.columns:
+            df['is_subscriber'] = False
         
         # Handle read_time
         if 'read_time' not in df.columns:

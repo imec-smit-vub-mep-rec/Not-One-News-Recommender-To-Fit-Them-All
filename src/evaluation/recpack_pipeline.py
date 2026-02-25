@@ -1228,8 +1228,8 @@ def run_cluster_evaluation_legacy_style(
     
     # Metric columns to aggregate (exclude user_id, algorithm, cluster_id)
     metric_cols = [c for c in merged.columns if c not in ('user_id', 'algorithm', 'cluster_id')]
-    
-    # Aggregate per cluster per algorithm
+
+    # Aggregate per cluster per algorithm (per-user metrics only)
     cluster_results: Dict[int, pd.DataFrame] = {}
     for cluster_id in sorted(merged['cluster_id'].unique()):
         cluster_merged = merged[merged['cluster_id'] == cluster_id]
@@ -1243,6 +1243,12 @@ def run_cluster_evaluation_legacy_style(
             output_path = Path(output_dir) / f'cluster_{cid}_results.csv'
             save_dataframe(cdf, str(output_path))
         logger.info(f"Saved legacy-style results for {len(cluster_results)} clusters to {output_dir}")
+
+        # Global catalog-level metrics (CoverageK, GiniK, topic variants)
+        if not results_df.empty:
+            global_path = Path(output_dir) / "global_results.csv"
+            save_dataframe(results_df, str(global_path))
+            logger.info(f"Saved global results (incl. diversity metrics) to {global_path}")
 
         # Legacy-format output: {Algorithm}_{k}.csv with user_id_ext, score (matches 00_legacy)
         legacy_dir = Path(output_dir) / "legacy_format"

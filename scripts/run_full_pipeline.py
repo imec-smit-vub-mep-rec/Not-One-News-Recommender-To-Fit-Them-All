@@ -112,6 +112,58 @@ def _save_session_embeddings_if_available(articles_df, config: PipelineConfig, s
     )
 
 
+def _derive_subscriber_from_paywall_metered(
+    impressions_df,
+    articles_df,
+    min_paywall_reads: int = 2,
+    min_read_time_seconds: float = 30.0,
+):
+    """Derive user-level subscriber flags from metered paywall behavior.
+
+    A user is marked subscriber when they have at least ``min_paywall_reads``
+    impressions on paywalled articles with ``read_time`` strictly greater than
+    ``min_read_time_seconds``.
+    """
+    import pandas as pd
+
+    if articles_df is None or impressions_df is None:
+        return impressions_df
+    if 'article_id' not in impressions_df.columns or 'user_id' not in impressions_df.columns:
+        return impressions_df
+    if 'article_id' not in articles_df.columns or 'is_paywall' not in articles_df.columns:
+        return impressions_df
+
+    df = impressions_df.copy()
+    lookup = articles_df[['article_id', 'is_paywall']].drop_duplicates(subset='article_id').copy()
+    lookup['is_paywall'] = lookup['is_paywall'].fillna(False).astype(bool)
+
+    merged = df[['user_id', 'article_id', 'read_time']].merge(
+        lookup, on='article_id', how='left'
+    )
+    read_time = pd.to_numeric(merged['read_time'], errors='coerce').fillna(0.0)
+    qualifying = merged['is_paywall'].fillna(False) & (read_time > float(min_read_time_seconds))
+
+    qualifying_counts = merged.loc[qualifying].groupby('user_id').size()
+    derived = qualifying_counts >= int(min_paywall_reads)
+    derived = derived.astype(bool)
+
+    user_ids = df['user_id'].dropna().astype(str).unique()
+    derived = derived.reindex(user_ids, fill_value=False)
+
+    if 'is_subscriber' in df.columns:
+        existing = df.groupby('user_id')['is_subscriber'].any().reindex(user_ids, fill_value=False).astype(bool)
+        user_subscriber = existing | derived
+    else:
+        user_subscriber = derived
+
+    df['is_subscriber'] = df['user_id'].map(user_subscriber).fillna(False).astype(bool)
+    logger.info(
+        "Derived subscriber status from metered paywall: "
+        f"{int(user_subscriber.sum())}/{len(user_subscriber)} users"
+    )
+    return df
+
+
 def parse_args():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(
@@ -352,6 +404,18 @@ def run_conversion(config: PipelineConfig, session: Session) -> tuple:
         # Convert impressions
         logger.info("Converting impressions...")
         impressions_df = converter.convert_impressions()
+
+    # Keep logged-in and subscriber concepts disentangled:
+    # - is_logged_in comes from impression auth state
+    # - is_subscriber is derived from metered paywall behavior when available
+    if config.dataset.name in ("ad", "hln", "vk"):
+        min_paywall_reads = 1 if config.dataset.name == "vk" else 2
+        impressions_df = _derive_subscriber_from_paywall_metered(
+            impressions_df,
+            articles_df,
+            min_paywall_reads=min_paywall_reads,
+            min_read_time_seconds=30.0,
+        )
     
     articles_path = session.get_path("articles.parquet")
     save_dataframe(articles_df, articles_path)
@@ -494,14 +558,33 @@ def _compute_cluster_summary(
     cluster_sizes = users_unique.groupby('cluster_id')['user_id'].nunique()
     cluster_pct = (cluster_sizes / total_users * 100).round(2)
 
-    # --- Subscriber counts (post-hoc, not a clustering feature) ---------------------
+    # --- Subscriber and logged-in counts (post-hoc, not clustering features) --------
     if 'is_subscriber' in impressions_df.columns:
-        sub_per_user = impressions_df.loc[valid_mask, ['user_id', 'is_subscriber']].groupby('user_id')['is_subscriber'].any().astype(int)
+        sub_per_user = (
+            impressions_df.loc[valid_mask, ['user_id', 'is_subscriber']]
+            .groupby('user_id')['is_subscriber']
+            .any()
+            .astype(int)
+        )
         sub_per_user = sub_per_user.reindex(user_cluster.index, fill_value=0)
         sub_counts = sub_per_user.groupby(user_cluster).sum()
     else:
         sub_per_user = pd.Series(0, index=user_cluster.index, dtype=int)
         sub_counts = pd.Series(0, index=cluster_sizes.index)
+
+    has_logged_in = 'is_logged_in' in impressions_df.columns
+    if has_logged_in:
+        logged_in_per_user = (
+            impressions_df.loc[valid_mask, ['user_id', 'is_logged_in']]
+            .groupby('user_id')['is_logged_in']
+            .any()
+            .astype(int)
+        )
+        logged_in_per_user = logged_in_per_user.reindex(user_cluster.index, fill_value=0)
+        logged_in_counts = logged_in_per_user.groupby(user_cluster).sum()
+    else:
+        logged_in_per_user = pd.Series(0, index=user_cluster.index, dtype=int)
+        logged_in_counts = pd.Series(0, index=cluster_sizes.index)
 
     # --- Per-user metrics (then average per cluster) --------------------------------
     is_homepage = df['article_id'].isna() | df['article_id'].eq('homepage')
@@ -533,22 +616,47 @@ def _compute_cluster_summary(
         impressions_per_session = df.groupby(['user_id', 'session_id']).size()
         avg_impressions_per_session = impressions_per_session.groupby('user_id').mean().reindex(user_cluster.index, fill_value=0)
 
-        logged_in_mask = sub_per_user.astype(bool)
-        avg_sessions_logged_in = (
-            session_counts[logged_in_mask]
-            .groupby(user_cluster[logged_in_mask])
-            .mean()
-            .reindex(cluster_sizes.index)
-        )
-        avg_sessions_non_logged_in = (
-            session_counts[~logged_in_mask]
-            .groupby(user_cluster[~logged_in_mask])
-            .mean()
-            .reindex(cluster_sizes.index)
-        )
+        has_subscriber = 'is_subscriber' in impressions_df.columns
+        if has_subscriber:
+            subscriber_mask = sub_per_user.astype(bool)
+            avg_sessions_subscriber = (
+                session_counts[subscriber_mask]
+                .groupby(user_cluster[subscriber_mask])
+                .mean()
+                .reindex(cluster_sizes.index)
+            )
+            avg_sessions_non_subscriber = (
+                session_counts[~subscriber_mask]
+                .groupby(user_cluster[~subscriber_mask])
+                .mean()
+                .reindex(cluster_sizes.index)
+            )
+        else:
+            avg_sessions_subscriber = pd.Series(np.nan, index=cluster_sizes.index)
+            avg_sessions_non_subscriber = pd.Series(np.nan, index=cluster_sizes.index)
+
+        if has_logged_in:
+            logged_in_mask = logged_in_per_user.astype(bool)
+            avg_sessions_logged_in = (
+                session_counts[logged_in_mask]
+                .groupby(user_cluster[logged_in_mask])
+                .mean()
+                .reindex(cluster_sizes.index)
+            )
+            avg_sessions_non_logged_in = (
+                session_counts[~logged_in_mask]
+                .groupby(user_cluster[~logged_in_mask])
+                .mean()
+                .reindex(cluster_sizes.index)
+            )
+        else:
+            avg_sessions_logged_in = pd.Series(np.nan, index=cluster_sizes.index)
+            avg_sessions_non_logged_in = pd.Series(np.nan, index=cluster_sizes.index)
     else:
         session_counts = zero_user
         avg_impressions_per_session = zero_user
+        avg_sessions_subscriber = pd.Series(np.nan, index=cluster_sizes.index)
+        avg_sessions_non_subscriber = pd.Series(np.nan, index=cluster_sizes.index)
         avg_sessions_logged_in = pd.Series(np.nan, index=cluster_sizes.index)
         avg_sessions_non_logged_in = pd.Series(np.nan, index=cluster_sizes.index)
 
@@ -704,18 +812,34 @@ def _compute_cluster_summary(
 
     cluster_means = user_metrics.groupby('cluster_id').mean().round(4)
 
-    summary = pd.DataFrame({
+    sub_proportion = (sub_counts / cluster_sizes.replace(0, np.nan)).fillna(0).round(4)
+    logged_in_proportion = (logged_in_counts / cluster_sizes.replace(0, np.nan)).fillna(0).round(4)
+
+    cols = {
         'Number of Users': cluster_sizes,
         'Percentage of Users (%)': cluster_pct,
         subscriber_label: sub_counts,
+        'Proportion of Subscribers': sub_proportion,
+    }
+    if has_logged_in:
+        cols['Number of Logged-in Users'] = logged_in_counts
+        cols['Proportion of Logged-in Users'] = logged_in_proportion
+
+    cols.update({
         'Avg Reading Time (s)': cluster_means['avg_reading_time'],
         'Proportion of Time on Articles': cluster_means['proportion_article_time'],
         'Avg Reading Time Homepage (s)': cluster_means['avg_reading_time_homepage'],
         'Avg Reading Time Articles (s)': cluster_means['avg_reading_time_articles'],
         'Avg Impressions per Session': cluster_means['avg_impressions_per_session'],
         'Avg Sessions per User': cluster_means['avg_sessions_per_user'],
-        'Avg Sessions per Logged-in User': avg_sessions_logged_in.round(4),
-        'Avg Sessions per Non-logged-in User': avg_sessions_non_logged_in.round(4),
+        'Avg Sessions per Subscriber': avg_sessions_subscriber.round(4),
+        'Avg Sessions per Non-subscriber': avg_sessions_non_subscriber.round(4),
+    })
+    if has_logged_in:
+        cols['Avg Sessions per Logged-in User'] = avg_sessions_logged_in.round(4)
+        cols['Avg Sessions per Non-logged-in User'] = avg_sessions_non_logged_in.round(4)
+
+    cols.update({
         'Avg Categories Read': cluster_means['avg_categories_read'],
         'Avg Session Duration (s)': cluster_means['avg_session_duration'],
         'Avg Category Switches per Session': cluster_means['avg_category_switches'],
@@ -731,6 +855,8 @@ def _compute_cluster_summary(
         'Avg Category Entropy': cluster_means['category_entropy'].round(4),
         'Avg Category Gini': cluster_means['category_gini'].round(4),
     })
+
+    summary = pd.DataFrame(cols)
 
     if 'device_desktop' in cluster_means.columns:
         summary['Desktop (%)'] = (cluster_means['device_desktop'] * 100).round(2)
@@ -1099,7 +1225,7 @@ def run_clustering(
     logger.info(f"Saved visualizations to {viz_dir}")
     
     # Save cluster profiles Excel to clusters/ directory
-    subscriber_label = "Number of Logged In Users" if config.dataset.name in ("ad", "hln", "vk") else "Number of Subscribers"
+    subscriber_label = "Number of Subscribers"
 
     save_cluster_profiles_excel(
         features_df=features_df,

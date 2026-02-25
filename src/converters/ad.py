@@ -224,6 +224,7 @@ class ADConverter(BaseConverter):
 
         df = wr.s3.read_csv(**read_kwargs)
         self.logger.info(f"Loaded {len(df)} raw articles")
+        article_col_map = {self._normalize_colname(col): col for col in df.columns}
 
         # Standard mappings
         if "ARTICLE_IDENTIFIER" in df.columns:
@@ -259,6 +260,12 @@ class ADConverter(BaseConverter):
 
         if "article_word_count" in df.columns:
             df["article_length"] = pd.to_numeric(df["article_word_count"], errors="coerce").fillna(0)
+
+        # Keep paywall marker when available for metered subscriber derivation.
+        if "IS_PAYWALL" in article_col_map:
+            df["is_paywall"] = self._to_bool(df[article_col_map["IS_PAYWALL"]]).astype(bool)
+        else:
+            df["is_paywall"] = False
 
         # Use schema default if absent later, but set explicit value for clarity.
         df["sentiment_score"] = 0.5
@@ -363,7 +370,7 @@ class ADConverter(BaseConverter):
         out["session_id"] = df[session_col].astype("string")
         out["impression_id"] = df[impression_col].astype("string")
         out["read_time"] = pd.to_numeric(df[time_on_page_col], errors="coerce").fillna(0.0)
-        out["is_subscriber"] = self._to_bool(df[is_logged_in_col]).astype(bool)
+        out["is_logged_in"] = self._to_bool(df[is_logged_in_col]).astype(bool)
 
         # Convert RFC3339 timestamps to Unix milliseconds.
         ms = (timestamps.view("int64") // 10**6).astype("Int64")

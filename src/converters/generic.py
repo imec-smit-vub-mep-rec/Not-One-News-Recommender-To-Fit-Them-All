@@ -178,6 +178,8 @@ class GenericConverter(BaseConverter):
         
         if 'is_subscriber' not in df.columns:
             df['is_subscriber'] = False
+        if 'is_logged_in' not in df.columns:
+            df['is_logged_in'] = False
         
         # Normalize impression_time to milliseconds
         df = self._normalize_timestamp(df, 'impression_time')
