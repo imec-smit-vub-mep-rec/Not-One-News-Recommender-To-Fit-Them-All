@@ -1196,14 +1196,25 @@ def run_clustering(
     eval_metrics = clusterer.evaluate(X)
     logger.info(f"Clustering evaluation: {eval_metrics}")
 
-    # Per-cluster silhouette scores
+    # Per-cluster silhouette scores — use subsample to avoid O(n²) on full dataset
     per_cluster_silhouette = {}
     try:
         from sklearn.metrics import silhouette_samples
         import numpy as _np
-        _sample_sil = silhouette_samples(X, labels)
-        for _cid in _np.unique(labels):
-            per_cluster_silhouette[int(_cid)] = float(_sample_sil[labels == _cid].mean())
+
+        _max_sil_samples = 10_000
+        _n = len(labels)
+        if _n > _max_sil_samples:
+            _rng = _np.random.RandomState(42)
+            _idx = _rng.choice(_n, _max_sil_samples, replace=False)
+            _X_sub, _labels_sub = X[_idx], labels[_idx]
+            logger.info(f"Computing per-cluster silhouette on subsample of {_max_sil_samples} (full: {_n})")
+        else:
+            _X_sub, _labels_sub = X, labels
+
+        _sample_sil = silhouette_samples(_X_sub, _labels_sub)
+        for _cid in _np.unique(_labels_sub):
+            per_cluster_silhouette[int(_cid)] = float(_sample_sil[_labels_sub == _cid].mean())
         logger.info(f"Per-cluster silhouette: {per_cluster_silhouette}")
     except Exception as _e:
         logger.warning(f"Could not compute per-cluster silhouette: {_e}")
