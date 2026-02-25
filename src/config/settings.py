@@ -182,6 +182,10 @@ class EvaluationConfig:
     # LastItemPrediction settings
     n_most_recent_in: int = 30
 
+    # Legacy-style evaluation: train on full dataset, aggregate metrics per cluster
+    # (matches 00_legacy pipeline). If False, train a separate model per cluster.
+    train_on_full_dataset: bool = True
+
 
 @dataclass
 class SessionConfig:

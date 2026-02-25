@@ -16,6 +16,7 @@ def _patched_torch_load(*args, **kwargs):
 torch.load = _patched_torch_load
 
 from typing import Dict, List, Optional, Any, Tuple, Set
+import itertools
 import pandas as pd
 import numpy as np
 from pathlib import Path
@@ -143,6 +144,72 @@ def _extract_validation_data(scenario: Any, train_data: Any) -> Optional[Tuple[c
 
     logger.warning("Validation data not exposed by scenario; falling back to local holdout split")
     return _build_validation_from_train(train_data)
+
+
+def _run_grid_search(
+    algo_name: str,
+    algo_class: Any,
+    grid: Dict[str, List[Any]],
+    train_data: Any,
+    eval_in: Any,
+    eval_out: Any,
+    base_params: Dict[str, Any],
+    optimization_metric: str,
+    optimization_k: int,
+    content_df: Optional[pd.DataFrame],
+    item_mapping: Optional[Dict],
+    embeddings_df: Optional[pd.DataFrame],
+    embedding_column: str,
+    seed: int,
+) -> Dict[str, Any]:
+    """Run grid search for an algorithm, return best params by optimization metric."""
+    from recpack.metrics import NDCGK, RecallK, PrecisionK
+
+    if optimization_metric == 'NDCGK':
+        metric_class = NDCGK
+    elif optimization_metric == 'RecallK':
+        metric_class = RecallK
+    elif optimization_metric == 'PrecisionK':
+        metric_class = PrecisionK
+    else:
+        metric_class = NDCGK
+
+    keys = list(grid.keys())
+    values = list(grid.values())
+    best_score = -1.0
+    best_params = dict(base_params)
+
+    for combo in itertools.product(*values):
+        params = dict(base_params)
+        params.update(dict(zip(keys, combo)))
+
+        try:
+            if algo_name in ('CB-ST', 'CB-ST-sklearn', 'CB-ST-annoy', 'SentenceTransformerContentBased'):
+                if (content_df is None and embeddings_df is None) or item_mapping is None:
+                    continue
+                instance = algo_class(
+                    content=content_df if content_df is not None else {},
+                    item_mapping=item_mapping,
+                    embeddings=embeddings_df,
+                    embedding_column=embedding_column,
+                    **params,
+                )
+            else:
+                instance = algo_class(**params)
+
+            pred = _fit_and_predict_algorithm(instance, train_data, eval_in)
+            m = metric_class(optimization_k)
+            m.calculate(eval_out, pred)
+            score = m.value
+            if score > best_score:
+                best_score = score
+                best_params = dict(params)
+        except Exception as e:
+            logger.debug("Grid combo %s failed for %s: %s", combo, algo_name, e)
+            continue
+
+    logger.info("Grid search %s: best %s@%d = %.4f, params = %s", algo_name, optimization_metric, optimization_k, best_score, best_params)
+    return best_params
 
 
 def _resolve_algorithm_params(
@@ -377,7 +444,13 @@ def run_evaluation(
     embedding_column: str = 'embedding',
     batch_size: int = 10000,
     articles_df: Optional[pd.DataFrame] = None,
-) -> Tuple[pd.DataFrame, List[Dict[str, Any]]]:
+    return_per_user_metrics: bool = False,
+    user_mapping: Optional[Dict[str, int]] = None,
+    n_most_recent_in: int = 30,
+    algorithm_grids: Optional[Dict[str, Dict[str, List[Any]]]] = None,
+    optimization_metric: str = 'NDCGK',
+    optimization_k: int = 100,
+) -> Tuple[pd.DataFrame, List[Dict[str, Any]], Optional[pd.DataFrame]]:
     """Run evaluation for multiple algorithms using LastItemPrediction scenario.
     
     Uses LastItemPrediction scenario (matching legacy behavior) where each user's
@@ -399,10 +472,19 @@ def run_evaluation(
         embedding_column: Column name in embeddings_df containing the embedding vectors.
         batch_size: Batch size for prediction to avoid OOM errors.
         articles_df: Optional articles DataFrame with article_id and categories for topic-level metrics.
-        
+        return_per_user_metrics: If True, return per-user metrics for cluster aggregation.
+        user_mapping: Dict mapping original user_id -> internal uid. Required when
+                      return_per_user_metrics=True for mapping row indices to user_ids.
+        n_most_recent_in: Number of most recent interactions for training (legacy: 30).
+        algorithm_grids: Per-algorithm grid for hyperparameter search (e.g. ItemKNN, EASE).
+        optimization_metric: Metric for grid search (default: NDCGK).
+        optimization_k: K value for optimization metric (default: 100).
+
     Returns:
-        Tuple of (results DataFrame, topic_reports list).
+        Tuple of (results DataFrame, topic_reports list, per_user_metrics DataFrame or None).
         topic_reports: List of dicts with keys algorithm, k, report_df (DataFrame with topic popularity).
+        per_user_metrics: When return_per_user_metrics=True, DataFrame with user_id, algorithm,
+                         and metric columns (NDCGK_10, etc.). None otherwise.
     """
     check_recpack_available()
     algorithm_params = algorithm_params or {}
@@ -418,19 +500,24 @@ def run_evaluation(
     logger.info(f"Metrics will be computed for k = {k_values}")
     
     # Use LastItemPrediction scenario (matches legacy behavior)
-    # This predicts the last item each user interacted with, using all earlier items for training
-    logger.info("Using LastItemPrediction scenario (legacy behavior)")
+    # This predicts the last item each user interacted with, using n_most_recent_in for training
+    logger.info("Using LastItemPrediction scenario (n_most_recent_in=%d)", n_most_recent_in)
     
     try:
-        scenario = LastItemPrediction(
-            validation=True,
-            seed=seed,
-        )
+        try:
+            scenario = LastItemPrediction(
+                validation=True,
+                seed=seed,
+                n_most_recent_in=n_most_recent_in,
+            )
+        except TypeError:
+            logger.warning("LastItemPrediction does not support n_most_recent_in, using default")
+            scenario = LastItemPrediction(validation=True, seed=seed)
         scenario.split(interaction_matrix)
     except (ZeroDivisionError, ValueError) as e:
         logger.warning(f"Failed to create scenario split (likely insufficient data): {e}")
         logger.warning("Returning empty results for this subset")
-        return pd.DataFrame(), []
+        return pd.DataFrame(), [], None
     
     # Get train and test data from scenario.
     train_matrix = scenario.full_training_data
@@ -443,12 +530,53 @@ def run_evaluation(
 
     if test_out_data is None or test_out_data.nnz == 0:
         logger.warning("No test data available for evaluation")
-        return pd.DataFrame(), []
+        return pd.DataFrame(), [], None
 
     n_users = test_in_data.shape[0]
     n_items = test_in_data.shape[1]
     logger.info(f"Test data shape: {n_users} users x {n_items} items")
     logger.info(f"Using batch size: {batch_size} for prediction")
+
+    # Resolve best params via grid search for algorithms with grid
+    algorithm_grids = algorithm_grids or {}
+    resolved_params = dict(algorithm_params)
+    available = get_available_algorithms(
+        include_content_based=(content_df is not None or embeddings_df is not None)
+    )
+    eval_in = test_in_data
+    eval_out = test_out_data
+    if validation_data is not None and len(validation_data) == 2:
+        val_in, val_out = validation_data
+        if val_out is not None and val_out.nnz > 0:
+            eval_in = val_in
+            eval_out = val_out
+            logger.info("Using validation set for grid search")
+    for algo_name in algorithms:
+        if algo_name not in available:
+            continue
+        grid = algorithm_grids.get(algo_name)
+        if not grid:
+            continue
+        algo_class = available[algo_name]
+        base_params = _resolve_algorithm_params(algo_name, algorithm_params, k_values, seed)
+        best = _run_grid_search(
+            algo_name=algo_name,
+            algo_class=algo_class,
+            grid=grid,
+            train_data=train_data,
+            eval_in=eval_in,
+            eval_out=eval_out,
+            base_params=base_params,
+            optimization_metric=optimization_metric,
+            optimization_k=optimization_k,
+            content_df=content_df,
+            item_mapping=item_mapping,
+            embeddings_df=embeddings_df,
+            embedding_column=embedding_column,
+            seed=seed,
+        )
+        resolved_params[algo_name] = best
+    algorithm_params = resolved_params
 
     # Instantiate algorithms.
     algo_instances: Dict[str, Any] = {}
@@ -493,7 +621,7 @@ def run_evaluation(
             algo_instances[algo_name] = algo_class(**params)
 
     if not algo_instances:
-        return pd.DataFrame(), []
+        return pd.DataFrame(), [], None
 
     # Build topic mapping for topic-level diversity metrics
     internal_id_to_categories: Dict[int, List[str]] = {}
@@ -506,10 +634,16 @@ def run_evaluation(
                 f"{len(internal_id_to_categories)} items with categories"
             )
 
+    # Build reverse user mapping for per-user metrics (internal uid -> original user_id)
+    internal_to_original_user: Optional[Dict[int, str]] = None
+    if return_per_user_metrics and user_mapping:
+        internal_to_original_user = {int(v): str(k) for k, v in user_mapping.items()}
+
     # Evaluate all algorithms with batching
     from recpack.metrics import NDCGK, RecallK, PrecisionK, CoverageK
     rows: List[Dict[str, Any]] = []
     topic_reports: List[Dict[str, Any]] = []
+    per_user_rows: List[Dict[str, Any]] = []
     
     for algo_name, algo_instance in algo_instances.items():
         try:
@@ -597,6 +731,31 @@ def run_evaluation(
                     metric_sums[f'exposure_{k}'] += batch_exposure
                 
                 total_valid_users += batch_valid_users
+
+                # Per-user metrics for legacy-style cluster aggregation
+                if return_per_user_metrics and internal_to_original_user is not None:
+                    nnz_per_row = np.array(batch_out.getnnz(axis=1)).flatten()
+                    for i in range(current_batch_size):
+                        if nnz_per_row[i] == 0:
+                            continue
+                        global_idx = start_idx + i
+                        original_user_id = internal_to_original_user.get(global_idx)
+                        if original_user_id is None:
+                            continue
+                        user_out = batch_out[i : i + 1]
+                        user_pred = batch_pred[i : i + 1]
+                        user_row: Dict[str, Any] = {'user_id': original_user_id, 'algorithm': algo_name}
+                        for k in k_values:
+                            ndcg_u = NDCGK(k)
+                            ndcg_u.calculate(user_out, user_pred)
+                            user_row[f'NDCGK_{k}'] = ndcg_u.value
+                            recall_u = RecallK(k)
+                            recall_u.calculate(user_out, user_pred)
+                            user_row[f'RecallK_{k}'] = recall_u.value
+                            precision_u = PrecisionK(k)
+                            precision_u.calculate(user_out, user_pred)
+                            user_row[f'PrecisionK_{k}'] = precision_u.value
+                        per_user_rows.append(user_row)
                 
                 # Free memory
                 del batch_pred
@@ -654,7 +813,8 @@ def run_evaluation(
             import traceback
             logger.debug(traceback.format_exc())
 
-    return (pd.DataFrame(rows) if rows else pd.DataFrame()), topic_reports
+    per_user_df = pd.DataFrame(per_user_rows) if return_per_user_metrics and per_user_rows else None
+    return (pd.DataFrame(rows) if rows else pd.DataFrame()), topic_reports, per_user_df
 
 
 class RecPackPipeline:
@@ -798,7 +958,7 @@ class RecPackPipeline:
         
         item_mapping = self.preprocessing_info.get('item_mapping')
         
-        self.results, self.topic_reports = run_evaluation(
+        self.results, self.topic_reports, _ = run_evaluation(
             self.interaction_matrix,
             algorithms=algorithms,
             algorithm_params=algorithm_params,
@@ -971,6 +1131,153 @@ def _evaluate_single_cluster(
         return cluster_id, None
 
 
+def run_cluster_evaluation_legacy_style(
+    interactions_df: pd.DataFrame,
+    users_df: pd.DataFrame,
+    content_df: Optional[pd.DataFrame] = None,
+    articles_df: Optional[pd.DataFrame] = None,
+    algorithms: Optional[List[str]] = None,
+    algorithm_params: Optional[Dict[str, Dict[str, Any]]] = None,
+    algorithm_grids: Optional[Dict[str, Dict[str, List[Any]]]] = None,
+    k_values: List[int] = [10, 20, 50],
+    min_items_per_user: int = 5,
+    output_dir: Optional[str] = None,
+    embeddings_df: Optional[pd.DataFrame] = None,
+    embedding_column: str = 'embedding',
+    n_most_recent_in: int = 30,
+    optimization_metric: str = 'NDCGK',
+    optimization_k: int = 100,
+) -> Dict[int, pd.DataFrame]:
+    """Run evaluation in legacy style: train on full dataset, aggregate metrics per cluster.
+    
+    Matches the 00_legacy pipeline behavior: one model trained on all interactions,
+    then per-user metrics are aggregated by cluster (mean per cluster).
+    
+    Args:
+        interactions_df: Full interactions DataFrame (all users)
+        users_df: DataFrame with user_id and cluster_id columns
+        content_df: Optional content DataFrame for CB algorithms
+        articles_df: Optional articles DataFrame for topic-level diversity metrics
+        algorithms: List of algorithm names
+        algorithm_params: Per-algorithm constructor kwargs
+        k_values: List of k values for metrics
+        min_items_per_user: Minimum items per user for RecPack filter
+        output_dir: Optional directory to save results (saves overall + per-cluster)
+        embeddings_df: Optional pre-calculated embeddings
+        embedding_column: Column name for embeddings
+        
+    Returns:
+        Dictionary mapping cluster_id to results DataFrame (one row per algorithm)
+    """
+    check_recpack_available()
+    
+    logger.info("Running LEGACY-STYLE evaluation: train on full dataset, aggregate metrics per cluster")
+    logger.info(f"NOTE: Users with < {min_items_per_user} interactions will be filtered by RecPack")
+    
+    interactions_df_local = interactions_df.copy()
+    interactions_df_local['user_id'] = interactions_df_local['user_id'].astype(str)
+    users_df_local = users_df.copy()
+    users_df_local['user_id'] = users_df_local['user_id'].astype(str)
+    
+    # Create interaction matrix from FULL dataset
+    interaction_matrix, preprocessing_info = create_interaction_matrix(
+        interactions_df_local,
+        min_items_per_user=min_items_per_user,
+    )
+    
+    user_mapping = preprocessing_info.get('user_mapping')
+    item_mapping = preprocessing_info.get('item_mapping')
+    
+    if not user_mapping:
+        logger.warning("No user mapping from preprocessing; cannot aggregate per cluster")
+        return {}
+    
+    # Run evaluation once on full data with per-user metrics
+    results_df, topic_reports, per_user_df = run_evaluation(
+        interaction_matrix,
+        algorithms=algorithms,
+        algorithm_params=algorithm_params,
+        algorithm_grids=algorithm_grids,
+        k_values=k_values,
+        content_df=content_df,
+        item_mapping=item_mapping,
+        embeddings_df=embeddings_df,
+        embedding_column=embedding_column,
+        articles_df=articles_df,
+        return_per_user_metrics=True,
+        user_mapping=user_mapping,
+        n_most_recent_in=n_most_recent_in,
+        optimization_metric=optimization_metric,
+        optimization_k=optimization_k,
+    )
+    
+    if per_user_df is None or per_user_df.empty:
+        logger.warning("No per-user metrics returned; cannot aggregate by cluster")
+        return {}
+    
+    # Merge with cluster assignments
+    merged = per_user_df.merge(
+        users_df_local[['user_id', 'cluster_id']].drop_duplicates(),
+        on='user_id',
+        how='inner',
+    )
+    
+    if merged.empty:
+        logger.warning("No overlap between evaluated users and cluster assignments")
+        return {}
+    
+    # Metric columns to aggregate (exclude user_id, algorithm, cluster_id)
+    metric_cols = [c for c in merged.columns if c not in ('user_id', 'algorithm', 'cluster_id')]
+    
+    # Aggregate per cluster per algorithm
+    cluster_results: Dict[int, pd.DataFrame] = {}
+    for cluster_id in sorted(merged['cluster_id'].unique()):
+        cluster_merged = merged[merged['cluster_id'] == cluster_id]
+        agg = cluster_merged.groupby('algorithm')[metric_cols].mean().reset_index()
+        cluster_results[int(cluster_id)] = agg
+    
+    # Save if output dir provided
+    if output_dir:
+        ensure_dir(output_dir)
+        for cid, cdf in cluster_results.items():
+            output_path = Path(output_dir) / f'cluster_{cid}_results.csv'
+            save_dataframe(cdf, str(output_path))
+        logger.info(f"Saved legacy-style results for {len(cluster_results)} clusters to {output_dir}")
+
+        # Legacy-format output: {Algorithm}_{k}.csv with user_id_ext, score (matches 00_legacy)
+        legacy_dir = Path(output_dir) / "legacy_format"
+        ensure_dir(str(legacy_dir))
+        for algo in per_user_df['algorithm'].unique():
+            algo_df = per_user_df[per_user_df['algorithm'] == algo]
+            for k in k_values:
+                col = f'NDCGK_{k}'
+                if col not in algo_df.columns:
+                    continue
+                legacy_df = algo_df[['user_id', col]].copy()
+                legacy_df.columns = ['user_id_ext', 'score']
+                legacy_path = legacy_dir / f"{algo}_{k}.csv"
+                save_dataframe(legacy_df, str(legacy_path))
+        logger.info(f"Saved legacy-format per-user files to {legacy_dir}")
+
+        # Coverage: recpack_users / original_users per cluster
+        original_counts = users_df_local.groupby('cluster_id')['user_id'].nunique()
+        recpack_users = merged.groupby('cluster_id')['user_id'].nunique()
+        coverage_df = pd.DataFrame({
+            'cluster_id': original_counts.index,
+            'original_users': original_counts.values,
+            'recpack_users': recpack_users.reindex(original_counts.index, fill_value=0).values,
+        })
+        coverage_df['coverage_ratio'] = (
+            coverage_df['recpack_users'] / coverage_df['original_users'].replace(0, np.nan)
+        ).fillna(0)
+        coverage_path = Path(output_dir) / "coverage_summary.csv"
+        save_dataframe(coverage_df, str(coverage_path))
+        logger.info("Coverage by cluster: %s", coverage_df.to_dict('records'))
+        logger.info(f"Saved coverage summary to {coverage_path}")
+
+    return cluster_results
+
+
 def run_cluster_evaluation(
     interactions_df: pd.DataFrame,
     users_df: pd.DataFrame,
@@ -985,7 +1292,7 @@ def run_cluster_evaluation(
     embeddings_df: Optional[pd.DataFrame] = None,
     embedding_column: str = 'embedding',
 ) -> Dict[int, pd.DataFrame]:
-    """Run evaluation for each user cluster.
+    """Run evaluation for each user cluster (train per cluster).
     
     NOTE: User filtering (min_items_per_user) happens HERE during RecPack
     preprocessing, NOT during data cleaning. This ensures clustering happens

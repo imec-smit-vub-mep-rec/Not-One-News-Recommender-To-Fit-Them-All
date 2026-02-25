@@ -181,6 +181,12 @@ def parse_args():
     )
     
     parser.add_argument(
+        "--train-per-cluster",
+        action="store_true",
+        help="Train a separate model per cluster (default: train on full dataset, aggregate per cluster)",
+    )
+    
+    parser.add_argument(
         "--content-mode",
         type=str,
         choices=["legacy", "full", "embeddings"],
@@ -297,6 +303,10 @@ def load_or_create_config(args) -> PipelineConfig:
     if args.content_mode:
         config.evaluation.content_mode = args.content_mode
         logger.info(f"CLI override: evaluation.content_mode = {args.content_mode}")
+
+    if args.train_per_cluster:
+        config.evaluation.train_on_full_dataset = False
+        logger.info("CLI override: evaluation.train_on_full_dataset = False (train per cluster)")
     
     return config
 
@@ -1040,7 +1050,7 @@ def run_clustering(
     # Cluster
     clusterer = KMeansClusterer(
         n_clusters=config.clustering.n_clusters,
-        k_range=range(2, 11),
+        k_range=range(1, 11),
         k_selection_method=config.clustering.k_selection_method,
         random_state=config.clustering.random_state,
     )
@@ -1138,7 +1148,11 @@ def run_evaluation(
     logger.info("=" * 60)
     
     try:
-        from src.evaluation import run_cluster_evaluation, ResultsAnalyzer
+        from src.evaluation import (
+            run_cluster_evaluation,
+            run_cluster_evaluation_legacy_style,
+            ResultsAnalyzer,
+        )
     except ImportError as e:
         logger.error(f"Could not import evaluation module: {e}")
         logger.error("RecPack may not be installed. Install with: pip install recpack")
@@ -1202,28 +1216,58 @@ def run_evaluation(
     # Run evaluation per cluster
     results_dir = session.get_path("evaluation_results")
     
-    # Extract algorithm names from AlgorithmConfig objects
+    # Extract algorithm names and params from AlgorithmConfig objects
     algorithm_names = [algo.name for algo in config.evaluation.algorithms if algo.enabled]
     algorithm_params = {
         algo.name: dict(algo.params)
         for algo in config.evaluation.algorithms
         if algo.enabled and getattr(algo, "params", None)
     }
+    algorithm_grids = {
+        algo.name: dict(algo.grid)
+        for algo in config.evaluation.algorithms
+        if algo.enabled and getattr(algo, "grid", None) and algo.grid
+    }
     
-    results = run_cluster_evaluation(
-        interactions_df=interactions_df,
-        users_df=users_df,
-        content_df=content_df,
-        articles_df=articles_df,
-        algorithms=algorithm_names,
-        algorithm_params=algorithm_params,
-        k_values=config.evaluation.k_values,
-        min_items_per_user=config.clustering.min_impressions_per_user,  # Filter only at evaluation
-        output_dir=results_dir,
-        n_jobs=1,  # Sequential cluster evaluation (parallel causes OOM on large datasets)
-        embeddings_df=embeddings_df,
-        embedding_column=embedding_column,
-    )
+    train_on_full = getattr(config.evaluation, "train_on_full_dataset", True)
+    
+    if train_on_full:
+        # Legacy-style: train once on full dataset, aggregate metrics per cluster
+        logger.info("Using LEGACY-STYLE evaluation (train on full dataset, aggregate per cluster)")
+        results = run_cluster_evaluation_legacy_style(
+            interactions_df=interactions_df,
+            users_df=users_df,
+            content_df=content_df,
+            articles_df=articles_df,
+            algorithms=algorithm_names,
+            algorithm_params=algorithm_params,
+            algorithm_grids=algorithm_grids,
+            k_values=config.evaluation.k_values,
+            min_items_per_user=config.clustering.min_impressions_per_user,
+            output_dir=results_dir,
+            embeddings_df=embeddings_df,
+            embedding_column=embedding_column,
+            n_most_recent_in=getattr(config.evaluation, "n_most_recent_in", 30),
+            optimization_metric=getattr(config.evaluation, "optimization_metric", "NDCGK"),
+            optimization_k=getattr(config.evaluation, "optimization_k", 100),
+        )
+    else:
+        # Per-cluster training: train a separate model per cluster
+        logger.info("Using PER-CLUSTER training (train separate model per cluster)")
+        results = run_cluster_evaluation(
+            interactions_df=interactions_df,
+            users_df=users_df,
+            content_df=content_df,
+            articles_df=articles_df,
+            algorithms=algorithm_names,
+            algorithm_params=algorithm_params,
+            k_values=config.evaluation.k_values,
+            min_items_per_user=config.clustering.min_impressions_per_user,
+            output_dir=results_dir,
+            n_jobs=1,
+            embeddings_df=embeddings_df,
+            embedding_column=embedding_column,
+        )
     
     log_memory("evaluation after cluster run")
 
@@ -1294,6 +1338,10 @@ def main():
         logger.info("CB-ST content: EMBEDDINGS (pre-calculated bert_embedding)")
     else:
         logger.info("CB-ST content: LEGACY (category + title only)")
+    train_on_full = getattr(config.evaluation, "train_on_full_dataset", True)
+    logger.info(
+        f"Evaluation mode: {'LEGACY (train on full, aggregate per cluster)' if train_on_full else 'PER-CLUSTER (train separate model per cluster)'}"
+    )
     logger.info("=" * 60)
     
     # Create session using the config

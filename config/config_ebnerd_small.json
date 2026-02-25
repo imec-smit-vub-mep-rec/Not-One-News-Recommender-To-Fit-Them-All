@@ -1,7 +1,7 @@
 {
   "dataset": {
     "name": "ebnerd",
-    "input_path": "data/ebnerd/ebnerd_large"
+    "input_path": "data/ebnerd/ebnerd_small"
   },
   "clustering": {
     "k_selection_method": "elbow",

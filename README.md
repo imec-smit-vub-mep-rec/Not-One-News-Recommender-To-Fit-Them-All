@@ -35,7 +35,7 @@ flowchart TB
 | **1. Data Conversion** | Convert raw format (Parquet, JSONL, Spark CSV) → standard schema |
 | **2. Preprocessing** | Validate, clean, create interactions (article-only) and article content. See details below. |
 | **3. User Clustering** | Extract behavioral features, K-Means clustering, assign cluster IDs |
-| **4. RecPack Evaluation** | Run algorithms per cluster, compute NDCG@K, Recall@K, etc. |
+| **4. RecPack Evaluation** | Train algorithms once on all interactions; compute per-user metrics; aggregate by cluster (NDCG@K, Recall@K, etc.). See Evaluation section. |
 
 **Preprocessing details:**
 - **Validation** – Check articles and impressions against expected schema (required columns, types, duplicates)
@@ -300,6 +300,8 @@ AD includes `bert_embedding` in `article_metadata.csv`. The converter creates `r
   },
   "evaluation": {
     "k_values": [10, 20, 50],
+    "train_on_full_dataset": true,
+    "n_most_recent_in": 30,
     "algorithms": [
       {"name": "Popularity", "enabled": true},
       {"name": "ItemKNN", "enabled": true},
@@ -339,9 +341,21 @@ AD includes `bert_embedding` in `article_metadata.csv`. The converter creates `r
 
 ## Evaluation
 
-- **Scenario:** LastItemPrediction (last interaction held out for testing)
+**Legacy mode (default):** Training is done **once on all interactions**; evaluation is per cluster.
+
+1. **Training:** All recommendation algorithms (Popularity, ItemKNN, EASE, MultVAE, CB-ST) are trained on the full interaction matrix (all users).
+2. **Per-user metrics:** Each user is predicted and scored (NDCG@K, Recall@K, Precision@K).
+3. **Aggregation:** Metrics are aggregated by cluster (mean per cluster) to compare performance across user segments.
+
+This matches the original `00_legacy` pipeline: one model, cluster-level evaluation.
+
+- **Scenario:** LastItemPrediction (last interaction held out for testing; `n_most_recent_in=30` for training)
 - **Metrics:** NDCG@K, Recall@K, Precision@K, Coverage@K, Gini@K, topic-level diversity
+- **Grid search:** ItemKNN and EASE use grid search (optimized by NDCG@100)
 - **Filtering:** Session bot filter (>50 interactions/session), min 5 article interactions per user
+- **Coverage:** `coverage_summary.csv` logs per-cluster coverage (recpack users / original users)
+
+**Alternative mode:** Use `--train-per-cluster` to train a separate model per cluster.
 
 ---
 
@@ -356,7 +370,10 @@ runs/ebnerd_20241215_120000/
 ├── user_clusters.parquet
 ├── evaluation_results/
 │   ├── cluster_0_results.csv
-│   └── ...
+│   ├── cluster_1_results.csv
+│   ├── ...
+│   ├── legacy_format/           # Per-user files (Algorithm_k.csv)
+│   └── coverage_summary.csv     # Per-cluster coverage
 └── evaluation_report.txt
 ```
 

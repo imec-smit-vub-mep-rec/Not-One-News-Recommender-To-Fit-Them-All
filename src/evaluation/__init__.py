@@ -4,6 +4,7 @@ from .recpack_pipeline import (
     RecPackPipeline,
     run_evaluation,
     run_cluster_evaluation,
+    run_cluster_evaluation_legacy_style,
     create_interaction_matrix,
 )
 from .analysis import (
@@ -19,6 +20,7 @@ __all__ = [
     "RecPackPipeline",
     "run_evaluation",
     "run_cluster_evaluation",
+    "run_cluster_evaluation_legacy_style",
     "create_interaction_matrix",
     # Analysis
     "ResultsAnalyzer",

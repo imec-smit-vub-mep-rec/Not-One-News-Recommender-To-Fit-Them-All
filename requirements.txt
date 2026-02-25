@@ -24,6 +24,9 @@ annoy>=1.17.0
 matplotlib>=3.6.0
 seaborn>=0.12.0
 
+# Clustering (elbow method for K-selection)
+kneed>=0.8.5
+
 # Development
 pytest>=7.0.0
 pytest-cov>=4.0.0

@@ -84,7 +84,7 @@ def _fit_kmeans_for_k(
 
 def find_optimal_k(
     X: np.ndarray,
-    k_range: range = range(2, 11),
+    k_range: range = range(1, 11),
     method: str = 'elbow',
     random_state: int = 42,
     n_init: int = 10,
@@ -158,16 +158,21 @@ def find_optimal_k(
         optimal_k = metrics['k_values'][optimal_idx]
         
     elif method == 'elbow':
-        # Elbow method using second derivative
+        # Elbow method using kneed (Kneedle algorithm)
+        from kneed import KneeLocator
+
+        k_list = metrics['k_values']
         inertias = np.array(metrics['inertias'])
-        
-        # Calculate first and second derivatives
-        first_derivative = np.diff(inertias)
-        second_derivative = np.diff(first_derivative)
-        
-        # Find elbow point (maximum second derivative)
-        optimal_idx = np.argmax(second_derivative) + 1
-        optimal_k = metrics['k_values'][optimal_idx]
+        kneedle = KneeLocator(
+            k_list,
+            inertias,
+            curve='convex',
+            direction='decreasing',
+        )
+        optimal_k = kneedle.elbow
+        if optimal_k is None:
+            optimal_k = 5 if 5 in k_list else k_list[len(k_list) // 2]
+            logger.info(f"No elbow found by kneed, using fallback k={optimal_k}")
         
     elif method == 'combined':
         # Combined score: normalize and combine silhouette and elbow
@@ -345,7 +350,7 @@ class KMeansClusterer:
     def __init__(
         self,
         n_clusters: Optional[int] = None,
-        k_range: range = range(2, 11),
+        k_range: range = range(1, 11),
         k_selection_method: str = 'elbow',
         random_state: int = 42,
         n_init: int = 10,
