@@ -206,7 +206,9 @@ def _run_grid_search(
                 best_params = dict(params)
         except Exception as e:
             logger.debug("Grid combo %s failed for %s: %s", combo, algo_name, e)
+            gc.collect()
             continue
+        gc.collect()
 
     logger.info("Grid search %s: best %s@%d = %.4f, params = %s", algo_name, optimization_metric, optimization_k, best_score, best_params)
     return best_params
