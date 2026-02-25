@@ -97,8 +97,7 @@ def remove_invalid_sessions(
     # Count impressions per session (for min filter: total impressions)
     session_counts_total = df.groupby(session_col).size()
     
-    # For max filter: legacy counted only article impressions; total would be more realistic
-    print('Max filter based on article impressions only: ', max_based_on_article_impressions_only)
+    # For max filter: use total impressions (incl. homepage) or article-only
     if max_impressions is not None and max_based_on_article_impressions_only and 'article_id' in df.columns:
         article_counts = df[df['article_id'].notna()].groupby(session_col).size()
         session_counts_for_max = article_counts.reindex(session_counts_total.index, fill_value=0)
@@ -384,15 +383,14 @@ class DataCleaner:
             df = remove_duplicate_impressions(df)
         
         # Remove invalid sessions (including bot filter with max_impressions_per_session)
-        # Congruent with legacy: max filter uses article impressions only (not total).
-        # Filtering on total impressions would be more realistic for bot detection.
+        # Filter on total impressions (incl. homepage views) for bot detection.
         if 'session_id' in df.columns:
             if self.min_impressions_per_session > 1 or self.max_impressions_per_session is not None:
                 df = remove_invalid_sessions(
                     df,
                     self.min_impressions_per_session,
                     self.max_impressions_per_session,
-                    max_based_on_article_impressions_only=True,
+                    max_based_on_article_impressions_only=False,
                 )
         
         # Remove outlier users (only if filter_users is enabled)
