@@ -171,7 +171,7 @@ def find_optimal_k(
         )
         optimal_k = kneedle.elbow
         if optimal_k is None:
-            optimal_k = 5 if 5 in k_list else k_list[len(k_list) // 2]
+            optimal_k = 4 if 4 in k_list else k_list[len(k_list) // 2]
             logger.info(f"No elbow found by kneed, using fallback k={optimal_k}")
         
     elif method == 'combined':
