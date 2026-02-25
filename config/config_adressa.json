@@ -10,10 +10,20 @@
   "evaluation": {
     "k_values": [10, 20, 50],
     "content_mode": "embeddings",
+    "train_on_full_dataset": true,
+    "n_most_recent_in": 30,
     "algorithms": [
       { "name": "Popularity", "enabled": true },
-      { "name": "ItemKNN", "enabled": true },
-      { "name": "EASE", "enabled": true },
+      {
+        "name": "ItemKNN",
+        "enabled": true,
+        "grid": {
+          "K": [50, 100, 200],
+          "normalize_sim": [true, false],
+          "normalize_X": [true, false]
+        }
+      },
+      { "name": "EASE", "enabled": true, "grid": { "l2": [1, 10, 100, 1000] } },
       {
         "name": "MultVAE",
         "enabled": true,
