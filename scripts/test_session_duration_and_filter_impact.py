@@ -169,6 +169,26 @@ def run_comparison(df: pd.DataFrame) -> None:
             t_leg = dur_legacy_filter_ts.get(u, np.nan)
             t_new = dur_new_filter_ts.get(u, np.nan)
             print(f"  {u}: read_sum={r_leg:.0f}/{r_new:.0f}s, ts_span={t_leg:.0f}/{t_new:.0f}s")
+
+    print("\nAggregate avg_session_duration (all users):")
+    print("  Legacy filter: read_sum mean={:.1f}s median={:.1f}s | ts_span mean={:.1f}s median={:.1f}s".format(
+        dur_legacy_filter_read.mean(), dur_legacy_filter_read.median(),
+        dur_legacy_filter_ts.mean(), dur_legacy_filter_ts.median()))
+    print("  New filter:    read_sum mean={:.1f}s median={:.1f}s | ts_span mean={:.1f}s median={:.1f}s".format(
+        dur_new_filter_read.mean(), dur_new_filter_read.median(),
+        dur_new_filter_ts.mean(), dur_new_filter_ts.median()))
+    print("\n  (Users only in legacy: {}, only in new: {})".format(
+        len(users_legacy - users_new), len(users_new - users_legacy)))
+
+    if users_with_both:
+        print("\n  Users in BOTH filters (n={}):".format(len(users_with_both)))
+        u_both = pd.Index(users_with_both)
+        r_leg_both = dur_legacy_filter_read.reindex(u_both).dropna()
+        r_new_both = dur_new_filter_read.reindex(u_both).dropna()
+        t_leg_both = dur_legacy_filter_ts.reindex(u_both).dropna()
+        t_new_both = dur_new_filter_ts.reindex(u_both).dropna()
+        print("    Legacy: read_sum mean={:.1f}s | ts_span mean={:.1f}s".format(r_leg_both.mean(), t_leg_both.mean()))
+        print("    New:    read_sum mean={:.1f}s | ts_span mean={:.1f}s".format(r_new_both.mean(), t_new_both.mean()))
     else:
         print("\nNo users in both filtered datasets (new filter may remove all data for some users).")
 
