@@ -20,6 +20,7 @@ from datetime import datetime
 import ast
 import json
 import gc
+import numpy as np
 
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -1169,6 +1170,17 @@ def run_clustering(
     
     features_df = extractor.fit_transform(impressions_df, articles_df)
     logger.info(f"Extracted {len(extractor.get_feature_names())} features for {len(features_df)} users")
+    
+    # Filter out top 2 outliers (by L2 norm in scaled space) to avoid degenerate clusters
+    X_full = extractor.get_feature_matrix(features_df)
+    outlier_scores = np.linalg.norm(X_full, axis=1)
+    n_outliers = min(2, len(features_df) - 3)  # Keep at least 3 users for clustering
+    if n_outliers > 0:
+        outlier_idx = np.argsort(outlier_scores)[-n_outliers:]
+        outlier_user_ids = features_df.iloc[outlier_idx]["user_id"].tolist()
+        mask = ~features_df["user_id"].isin(outlier_user_ids)
+        features_df = features_df[mask].reset_index(drop=True)
+        logger.info(f"Filtered out top {n_outliers} outlier(s): {outlier_user_ids}")
     
     # Save features
     save_dataframe(features_df, session.get_path("user_features.parquet"))

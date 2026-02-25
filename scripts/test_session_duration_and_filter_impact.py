@@ -5,6 +5,8 @@ Test script to compare the impact of:
 1. avg_session_duration: read_time_sum vs timestamp_span
 2. Session filter: drop entire sessions with >50 total impressions vs
    drop only article rows from sessions with >50 article impressions (legacy)
+3. Extra: exclude entire sessions with >50 article impressions OR >100 total impressions
+   
 
 Run: python scripts/test_session_duration_and_filter_impact.py
 
@@ -89,6 +91,23 @@ def filter_new(df: pd.DataFrame, max_impressions: int = 50) -> pd.DataFrame:
     return df[df["session_id"].isin(valid_sessions)].copy()
 
 
+def filter_article_or_total(
+    df: pd.DataFrame,
+    max_article_impressions: int = 50,
+    max_total_impressions: int = 100,
+) -> pd.DataFrame:
+    """
+    Exclude entire sessions with >50 article impressions OR >100 total impressions.
+    """
+    session_total = df.groupby("session_id").size()
+    with_article = df[df["article_id"].notna()]
+    session_article = with_article.groupby("session_id").size().reindex(session_total.index, fill_value=0)
+
+    exclude = (session_article > max_article_impressions) | (session_total > max_total_impressions)
+    valid_sessions = session_total.index[~exclude]
+    return df[df["session_id"].isin(valid_sessions)].copy()
+
+
 def avg_session_duration_read_time_sum(df: pd.DataFrame) -> pd.Series:
     """New: sum of read_time per session, averaged per user."""
     session_read_time = df.groupby(["user_id", "session_id"])["read_time"].sum()
@@ -116,16 +135,18 @@ def run_comparison(df: pd.DataFrame) -> None:
     # --- Session filter impact ---
     df_legacy = filter_legacy(df)
     df_new = filter_new(df)
+    df_article_or_total = filter_article_or_total(df)
 
     print("\n--- 1. SESSION FILTER IMPACT ---")
-    print(f"Original:        {len(df):,} rows, {df['session_id'].nunique():,} sessions, {df['user_id'].nunique():,} users")
-    print(f"Legacy filter:   {len(df_legacy):,} rows, {df_legacy['session_id'].nunique():,} sessions, {df_legacy['user_id'].nunique():,} users")
-    print(f"New filter:      {len(df_new):,} rows, {df_new['session_id'].nunique():,} sessions, {df_new['user_id'].nunique():,} users")
+    print(f"Original:           {len(df):,} rows, {df['session_id'].nunique():,} sessions, {df['user_id'].nunique():,} users")
+    print(f"Legacy filter:      {len(df_legacy):,} rows, {df_legacy['session_id'].nunique():,} sessions, {df_legacy['user_id'].nunique():,} users")
+    print(f"New filter (>50):   {len(df_new):,} rows, {df_new['session_id'].nunique():,} sessions, {df_new['user_id'].nunique():,} users")
+    print(f">50 art OR >100 tot:{len(df_article_or_total):,} rows, {df_article_or_total['session_id'].nunique():,} sessions, {df_article_or_total['user_id'].nunique():,} users")
 
     rows_diff = len(df_legacy) - len(df_new)
     sessions_diff = df_legacy["session_id"].nunique() - df_new["session_id"].nunique()
     users_diff = df_legacy["user_id"].nunique() - df_new["user_id"].nunique()
-    print(f"\nLegacy keeps {rows_diff:+,} more rows, {sessions_diff:+,} more sessions, {users_diff:+,} more users")
+    print(f"\nLegacy keeps {rows_diff:+,} more rows, {sessions_diff:+,} more sessions, {users_diff:+,} more users vs new (>50)")
 
     # --- avg_session_duration impact (on same filtered data) ---
     print("\n--- 2. AVG_SESSION_DURATION: read_time_sum vs timestamp_span ---")
@@ -154,11 +175,14 @@ def run_comparison(df: pd.DataFrame) -> None:
     print("\n--- 3. COMBINED: Filter impact on avg_session_duration ---")
     dur_legacy_filter_read = avg_session_duration_read_time_sum(df_legacy)
     dur_new_filter_read = avg_session_duration_read_time_sum(df_new)
+    dur_article_or_total_read = avg_session_duration_read_time_sum(df_article_or_total)
     dur_legacy_filter_ts = avg_session_duration_timestamp_span(df_legacy)
     dur_new_filter_ts = avg_session_duration_timestamp_span(df_new)
+    dur_article_or_total_ts = avg_session_duration_timestamp_span(df_article_or_total)
 
     users_legacy = set(df_legacy["user_id"].unique())
     users_new = set(df_new["user_id"].unique())
+    users_article_or_total = set(df_article_or_total["user_id"].unique())
     users_with_both = list(users_legacy & users_new)
     if users_with_both:
         u_common = list(users_with_both)[:10]
@@ -171,14 +195,17 @@ def run_comparison(df: pd.DataFrame) -> None:
             print(f"  {u}: read_sum={r_leg:.0f}/{r_new:.0f}s, ts_span={t_leg:.0f}/{t_new:.0f}s")
 
     print("\nAggregate avg_session_duration (all users):")
-    print("  Legacy filter: read_sum mean={:.1f}s median={:.1f}s | ts_span mean={:.1f}s median={:.1f}s".format(
+    print("  Legacy filter:      read_sum mean={:.1f}s median={:.1f}s | ts_span mean={:.1f}s median={:.1f}s".format(
         dur_legacy_filter_read.mean(), dur_legacy_filter_read.median(),
         dur_legacy_filter_ts.mean(), dur_legacy_filter_ts.median()))
-    print("  New filter:    read_sum mean={:.1f}s median={:.1f}s | ts_span mean={:.1f}s median={:.1f}s".format(
+    print("  New filter (>50):   read_sum mean={:.1f}s median={:.1f}s | ts_span mean={:.1f}s median={:.1f}s".format(
         dur_new_filter_read.mean(), dur_new_filter_read.median(),
         dur_new_filter_ts.mean(), dur_new_filter_ts.median()))
-    print("\n  (Users only in legacy: {}, only in new: {})".format(
-        len(users_legacy - users_new), len(users_new - users_legacy)))
+    print("  >50 art OR >100 tot:read_sum mean={:.1f}s median={:.1f}s | ts_span mean={:.1f}s median={:.1f}s".format(
+        dur_article_or_total_read.mean(), dur_article_or_total_read.median(),
+        dur_article_or_total_ts.mean(), dur_article_or_total_ts.median()))
+    print("\n  (Users only in legacy: {}, only in new: {}, in >50art|>100tot: {})".format(
+        len(users_legacy - users_new), len(users_new - users_legacy), len(users_article_or_total)))
 
     if users_with_both:
         print("\n  Users in BOTH filters (n={}):".format(len(users_with_both)))
