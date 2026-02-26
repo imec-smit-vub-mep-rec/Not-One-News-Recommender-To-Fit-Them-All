@@ -123,7 +123,7 @@ def _derive_subscriber_from_paywall_metered(
 
     A user is marked subscriber when they have at least ``min_paywall_reads``
     impressions on paywalled articles with ``read_time`` strictly greater than
-    ``min_read_time_seconds``.
+    ``min_read_time_seconds`` and the qualifying impressions are logged-in.
     """
     import pandas as pd
 
@@ -138,11 +138,19 @@ def _derive_subscriber_from_paywall_metered(
     lookup = articles_df[['article_id', 'is_paywall']].drop_duplicates(subset='article_id').copy()
     lookup['is_paywall'] = lookup['is_paywall'].fillna(False).astype(bool)
 
-    merged = df[['user_id', 'article_id', 'read_time']].merge(
+    if 'is_logged_in' not in df.columns:
+        df['is_logged_in'] = False
+
+    merged = df[['user_id', 'article_id', 'read_time', 'is_logged_in']].merge(
         lookup, on='article_id', how='left'
     )
     read_time = pd.to_numeric(merged['read_time'], errors='coerce').fillna(0.0)
-    qualifying = merged['is_paywall'].fillna(False) & (read_time > float(min_read_time_seconds))
+    logged_in = merged['is_logged_in'].fillna(False).astype(bool)
+    qualifying = (
+        merged['is_paywall'].fillna(False)
+        & (read_time > float(min_read_time_seconds))
+        & logged_in
+    )
 
     qualifying_counts = merged.loc[qualifying].groupby('user_id').size()
     derived = qualifying_counts >= int(min_paywall_reads)
@@ -150,12 +158,18 @@ def _derive_subscriber_from_paywall_metered(
 
     user_ids = df['user_id'].dropna().astype(str).unique()
     derived = derived.reindex(user_ids, fill_value=False)
+    user_logged_in = (
+        df.groupby('user_id')['is_logged_in']
+        .any()
+        .reindex(user_ids, fill_value=False)
+        .astype(bool)
+    )
 
     if 'is_subscriber' in df.columns:
         existing = df.groupby('user_id')['is_subscriber'].any().reindex(user_ids, fill_value=False).astype(bool)
-        user_subscriber = existing | derived
+        user_subscriber = (existing | derived) & user_logged_in
     else:
-        user_subscriber = derived
+        user_subscriber = derived & user_logged_in
 
     df['is_subscriber'] = df['user_id'].map(user_subscriber).fillna(False).astype(bool)
     logger.info(
