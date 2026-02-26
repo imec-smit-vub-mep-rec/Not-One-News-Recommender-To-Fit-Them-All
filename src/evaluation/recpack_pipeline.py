@@ -687,11 +687,16 @@ def run_evaluation(
                 metric_sums[f'exposure_{k}'] = np.zeros(n_items, dtype=np.float64)
             
             total_valid_users = 0
-            
+            n_batches = (n_users + batch_size - 1) // batch_size
+
             # Iterate through batches
             for start_idx in range(0, n_users, batch_size):
                 end_idx = min(start_idx + batch_size, n_users)
                 current_batch_size = end_idx - start_idx
+                batch_num = start_idx // batch_size + 1
+                if batch_num % 5 == 1 or batch_num == n_batches:
+                    pct = 100 * batch_num / n_batches
+                    logger.info("  %s: batch %d/%d (%.0f%% of users)", algo_name, batch_num, n_batches, pct)
                 
                 # Slice input and output
                 batch_in = test_in_data[start_idx:end_idx]
