@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Full pipeline script for RICON analysis.
 
@@ -123,7 +122,7 @@ def _derive_subscriber_from_paywall_metered(
 
     A user is marked subscriber when they have at least ``min_paywall_reads``
     impressions on paywalled articles with ``read_time`` strictly greater than
-    ``min_read_time_seconds`` and the qualifying impressions are logged-in.
+    ``min_read_time_seconds`` and the qualifying impressions are from logged-in users.
     """
     import pandas as pd
 
@@ -393,6 +392,7 @@ def run_conversion(config: PipelineConfig, session: Session) -> tuple:
     
     # Select converter
     # ad, hln, vk share the same S3 Spark CSV structure (article_metadata.csv + impressions/)
+    # todo: anonymize these comments and namings once the pipeline is stable to remove references to the concrete dataset names
     if config.dataset.name in ("ad", "hln", "vk") or dataset_format == "spark_csv":
         converter = ADConverter(config=config.dataset)
     elif dataset_format == "jsonl" or config.dataset.name == "adressa":
@@ -454,10 +454,10 @@ def run_preprocessing(
 ) -> tuple:
     """Run preprocessing step for CLUSTERING.
     
-    IMPORTANT: This preprocessing matches the legacy behavior:
-    1. NO user filtering - clustering happens on ALL users
-    2. NO removal of homepage views - homepage behavior is a clustering signal!
-       Users who only visit homepage are a distinct behavioral cluster.
+    IMPORTANT: This preprocessing matches the legacy behavior from the short paper:
+    0. Cleaning: remove empty articles, remove duplicates, remove invalid sessions (max 50 article impressions per session; bot filter), remove outlier users.
+    1. Clustering happens on all users (homepage + article readers), except for users with more than 50 article impressions per session and possibly heavy outliers.
+    2. NO removal of homepage views - homepage behavior is a clustering signal
     3. interactions.csv (for RecPack) is created separately and only includes
        rows with valid article_id. RecPack's MinItemsPerUser filter is applied there.
     
@@ -1179,14 +1179,14 @@ def run_clustering(
         include_diversity=True,
         include_homepage=True,  # Homepage behavior is a clustering signal (legacy behavior)
         legacy_mode=legacy_mode,  # Use legacy feature set if configured
-        scale=True,
+        scale=True, # Scale the features to prevent different scales from affecting the clustering result
     )
     
     features_df = extractor.fit_transform(impressions_df, articles_df)
     logger.info(f"Extracted {len(extractor.get_feature_names())} features for {len(features_df)} users")
     
-    # Filter out top 2 outliers (by L2 norm in scaled space) to avoid degenerate clusters
-    X_full = extractor.get_feature_matrix(features_df)
+    # Optional: filter out top N outliers (by L2 norm in scaled space) to avoid degenerate clusters
+    # this is needed to get meaningful results for AD and VK datasets
     outlier_scores = np.linalg.norm(X_full, axis=1)
     n_outliers = min(2, len(features_df) - 3)  # Keep at least 3 users for clustering
     if n_outliers > 0:
@@ -1297,7 +1297,7 @@ def run_evaluation(
     
     NOTE: User filtering (min_impressions_per_user) happens HERE via RecPack's
     MinItemsPerUser filter, NOT during preprocessing. This ensures clustering
-    happens on ALL users, while evaluation only includes users with enough
+    happens on ALL users after cleaning, while evaluation only includes users with enough
     interactions for meaningful recommendations.
     
     IMPORTANT: Pre-calculated embeddings are REQUIRED for CB-ST algorithm.
