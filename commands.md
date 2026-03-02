@@ -4,6 +4,7 @@ Note: I will remove this document once the pipeline is stable and all the result
 ```bash
 python scripts/run_full_pipeline.py --config config/config_ad.json --verbose
 
+python scripts/run_full_pipeline.py --config config/config_ebnerd_small.json --verbose
 python scripts/run_full_pipeline.py --config config/config_hln.json --verbose
 
 python scripts/run_full_pipeline.py --config config/config_vk.json --verbose

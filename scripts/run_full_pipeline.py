@@ -20,6 +20,7 @@ import ast
 import json
 import gc
 import numpy as np
+import pandas as pd
 
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -165,6 +166,7 @@ def _derive_subscriber_from_paywall_metered(
     )
 
     # NOTE: this probably has no impact on DPG datasets, but why add deduced subscribers, when the field is explicitly available?
+    # ANSWER: can you point me to thefield in the data that indicates whether a user is a subscriber?
     if 'is_subscriber' in df.columns:
         existing = df.groupby('user_id')['is_subscriber'].any().reindex(user_ids, fill_value=False).astype(bool)
         user_subscriber = (existing | derived) & user_logged_in
@@ -246,6 +248,13 @@ def parse_args():
         action="store_true",
         help="Skip RecPack evaluation",
     )
+
+    parser.add_argument(
+        "--remove-top",
+        type=int,
+        default=None,
+        help="Remove top N outlier users by L2 norm in scaled feature space before clustering (overrides clustering.remove_top)",
+    )
     
     parser.add_argument(
         "--train-per-cluster",
@@ -273,7 +282,10 @@ def parse_args():
         help="Verbose output",
     )
     
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.remove_top is not None and args.remove_top < 0:
+        parser.error("--remove-top must be >= 0")
+    return args
 
 
 def load_or_create_config(args) -> PipelineConfig:
@@ -367,6 +379,10 @@ def load_or_create_config(args) -> PipelineConfig:
         config.clustering.legacy_features = True
         logger.info("CLI override: clustering.legacy_features = True")
 
+    if args.remove_top is not None:
+        config.clustering.remove_top = args.remove_top
+        logger.info(f"CLI override: clustering.remove_top = {args.remove_top}")
+
     if args.content_mode:
         config.evaluation.content_mode = args.content_mode
         logger.info(f"CLI override: evaluation.content_mode = {args.content_mode}")
@@ -374,6 +390,9 @@ def load_or_create_config(args) -> PipelineConfig:
     if args.train_per_cluster:
         config.evaluation.train_on_full_dataset = False
         logger.info("CLI override: evaluation.train_on_full_dataset = False (train per cluster)")
+
+    if config.clustering.remove_top < 0:
+        raise ValueError("clustering.remove_top must be >= 0")
     
     return config
 
@@ -426,6 +445,7 @@ def run_conversion(config: PipelineConfig, session: Session) -> tuple:
     # Keep logged-in and subscriber concepts disentangled:
     # - is_logged_in comes from impression auth state
     # - is_subscriber is derived from metered paywall behavior when available
+    # ANSWER: AD/HLN allow 1 paywall article for logged-in users, VK allows 0. Since we don't have direct access to the paywall data, we can only use the impression data to deduce subscriber status.
     if config.dataset.name in ("ad", "hln", "vk"):
         min_paywall_reads = 1 if config.dataset.name == "vk" else 2
         impressions_df = _derive_subscriber_from_paywall_metered(
@@ -1023,10 +1043,6 @@ def save_cluster_profiles_excel(
     Returns:
         Path to the written Excel file.
     """
-    # NOTE: Not sure you need to reimport these things. Just import at start, it's going to lead to fewer problems
-    import numpy as np
-    import pandas as pd
-
     excel_path = session.get_path("cluster_profiles.xlsx", subdir="clusters")
 
     unique, counts = np.unique(labels, return_counts=True)
@@ -1156,6 +1172,7 @@ def run_clustering(
     articles_df,
     config: PipelineConfig,
     session: Session,
+    remove_top: int = 0,
 ) -> tuple:
     """Run clustering step on ALL users.
     
@@ -1177,6 +1194,7 @@ def run_clustering(
     
     # Extract features (including homepage behavior - matching legacy clustering)
     # NOTE: what do all the legacy things mean? And are the other things new compared to legacy? Is there overlap?
+    # ANSWER: The legacy features are the features that were used in the original clustering paper. The new features are features that would be interesting or better. But to stay close to the original, we use the legacy features for the current analysis.
     extractor = UserFeatureExtractor(
         include_categories=True,
         include_time=True,
@@ -1190,18 +1208,41 @@ def run_clustering(
     features_df = extractor.fit_transform(impressions_df, articles_df)
     logger.info(f"Extracted {len(extractor.get_feature_names())} features for {len(features_df)} users")
     
-    # Optional: filter out top N outliers (by L2 norm in scaled space) to avoid degenerate clusters
-    # this is needed to get meaningful results for AD and VK datasets
-    # NOTE: First mention of X_full in the entire repository
-    # NOTE, how is it Optional? Is it not going to always do this?
-    outlier_scores = np.linalg.norm(X_full, axis=1)
-    n_outliers = min(2, len(features_df) - 3)  # Keep at least 3 users for clustering
-    if n_outliers > 0:
-        outlier_idx = np.argsort(outlier_scores)[-n_outliers:]
-        outlier_user_ids = features_df.iloc[outlier_idx]["user_id"].tolist()
-        mask = ~features_df["user_id"].isin(outlier_user_ids)
-        features_df = features_df[mask].reset_index(drop=True)
-        logger.info(f"Filtered out top {n_outliers} outlier(s): {outlier_user_ids}")
+    # Optional: filter out top N outliers (by L2 norm in scaled space).
+    X = extractor.get_feature_matrix(features_df)
+    removed_outliers_summary = []
+    if remove_top > 0:
+        n_outliers = min(remove_top, len(features_df) - 3)  # Keep at least 3 users for clustering
+        if n_outliers > 0:
+            outlier_scores = np.linalg.norm(X, axis=1)
+            outlier_idx = np.argsort(outlier_scores)[-n_outliers:]
+            outlier_user_ids = features_df.iloc[outlier_idx]["user_id"].tolist()
+
+            # Build an outlier summary from pre-filter impressions.
+            outlier_impressions = impressions_df[impressions_df["user_id"].isin(outlier_user_ids)]
+            impression_counts = outlier_impressions.groupby("user_id").size()
+            if "session_id" in outlier_impressions.columns:
+                session_counts = outlier_impressions.groupby("user_id")["session_id"].nunique(dropna=True)
+            else:
+                session_counts = pd.Series(0, index=impression_counts.index)
+
+            removed_outliers_summary = [
+                {
+                    "user_id": str(user_id),
+                    "impressions": int(impression_counts.get(user_id, 0)),
+                    "sessions": int(session_counts.get(user_id, 0)),
+                }
+                for user_id in outlier_user_ids
+            ]
+
+            mask = ~features_df["user_id"].isin(outlier_user_ids)
+            features_df = features_df[mask].reset_index(drop=True)
+            X = extractor.get_feature_matrix(features_df)
+            logger.info(f"Filtered out top {n_outliers} outlier(s): {outlier_user_ids}")
+        else:
+            logger.info(
+                f"Skipping outlier removal (--remove-top={remove_top}) because too few users are available"
+            )
     
     # Save features
     save_dataframe(features_df, session.get_path("user_features.parquet"))
@@ -1214,7 +1255,6 @@ def run_clustering(
         random_state=config.clustering.random_state,
     )
     
-    X = extractor.get_feature_matrix(features_df)
     labels = clusterer.fit_predict(X)
     
     # Add cluster labels to features
@@ -1233,13 +1273,11 @@ def run_clustering(
     per_cluster_silhouette = {}
     try:
         from sklearn.metrics import silhouette_samples
-        # NOTE: Don't think you should reimport numpy here
-        import numpy as _np
 
         _max_sil_samples = 10_000
         _n = len(labels)
         if _n > _max_sil_samples:
-            _rng = _np.random.RandomState(42)
+            _rng = np.random.RandomState(42)
             _idx = _rng.choice(_n, _max_sil_samples, replace=False)
             _X_sub, _labels_sub = X[_idx], labels[_idx]
             logger.info(f"Computing per-cluster silhouette on subsample of {_max_sil_samples} (full: {_n})")
@@ -1247,7 +1285,7 @@ def run_clustering(
             _X_sub, _labels_sub = X, labels
 
         _sample_sil = silhouette_samples(_X_sub, _labels_sub)
-        for _cid in _np.unique(_labels_sub):
+        for _cid in np.unique(_labels_sub):
             per_cluster_silhouette[int(_cid)] = float(_sample_sil[_labels_sub == _cid].mean())
         logger.info(f"Per-cluster silhouette: {per_cluster_silhouette}")
     except Exception as _e:
@@ -1290,6 +1328,7 @@ def run_clustering(
         'n_clusters': clusterer.n_clusters,
         'metrics': eval_metrics,
         'feature_names': extractor.get_feature_names(),
+        'removed_outliers': removed_outliers_summary,
     }
 
 
@@ -1401,6 +1440,7 @@ def run_evaluation(
     }
     
     # NOTE: Hard to follow the full config trail, is this set to True for the DPG experiments?
+    # ANSWER: Yes, otherwise it trains a separate model per cluster, which is not what we want for the DPG experiments (how does one model perform on the different clusters?)
     train_on_full = getattr(config.evaluation, "train_on_full_dataset", True)
     
     if train_on_full:
@@ -1497,6 +1537,7 @@ def main():
         logger.info("Feature mode: MODERN (includes per-category proportions, time-of-day, entropy/gini)")
     logger.info(f"N clusters: {config.clustering.n_clusters or 'auto-detect'}")
     logger.info(f"K selection method: {config.clustering.k_selection_method}")
+    logger.info(f"🗑️ Outlier removal (top N): {config.clustering.remove_top}")
     content_mode = getattr(config.evaluation, "content_mode", "legacy")
     if args.full_content:
         logger.warning("--full-content is deprecated; use --content-mode full")
@@ -1546,8 +1587,18 @@ def main():
             users_df = load_dataframe(session.get_path("user_clusters.parquet"))
         else:
             features_df, labels, cluster_info = run_clustering(
-                impressions_df, articles_df, config, session
+                impressions_df, articles_df, config, session, remove_top=config.clustering.remove_top
             )
+            removed_outliers = cluster_info.get("removed_outliers", [])
+            if removed_outliers:
+                logger.info(f"🗑️ Outliers removed: {len(removed_outliers)}")
+                for outlier in removed_outliers:
+                    logger.info(
+                        f"  - user_id={outlier['user_id']}, "
+                        f"impressions={outlier['impressions']}, sessions={outlier['sessions']}"
+                    )
+            elif config.clustering.remove_top > 0:
+                logger.info("🗑️ Outliers removed: 0")
             users_df = features_df[['user_id', 'cluster_id']]
             del features_df, labels, cluster_info
 

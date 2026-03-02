@@ -5,7 +5,8 @@
   },
   "clustering": {
     "k_selection_method": "elbow",
-    "legacy_features": true
+    "legacy_features": true,
+    "remove_top": 2
   },
   "evaluation": {
     "k_values": [10, 20, 50],

@@ -161,7 +161,7 @@ def _run_grid_search(
     embeddings_df: Optional[pd.DataFrame],
     embedding_column: str,
     # NOTE: seed is unused, is that important?
-    seed: int,
+    # ANSWER: only used for MultVAE, but set somewhere else. Removed it for clarity.
 ) -> Dict[str, Any]:
     """Run grid search for an algorithm, return best params by optimization metric."""
     from recpack.metrics import NDCGK, RecallK, PrecisionK
@@ -476,6 +476,7 @@ def run_evaluation(
         batch_size: Batch size for prediction to avoid OOM errors.
         articles_df: Optional articles DataFrame with article_id and categories for topic-level metrics.
         # NOTE: what does it mean to return per-user metrics? What's the alternative?
+        # ANSWER: it means that we're evaluating NDCG and other metrics for each user, and then aggregating the results by cluster in the caller.
         return_per_user_metrics: If True, return per-user metrics for cluster aggregation.
         user_mapping: Dict mapping original user_id -> internal uid. Required when
                       return_per_user_metrics=True for mapping row indices to user_ids.
@@ -508,17 +509,13 @@ def run_evaluation(
     logger.info("Using LastItemPrediction scenario (n_most_recent_in=%d)", n_most_recent_in)
     
     # NOTE: Why double try?
+    # ANSWER: removed unlikely error catch
     try:
-        try:
-            scenario = LastItemPrediction(
-                validation=True,
-                seed=seed,
-                n_most_recent_in=n_most_recent_in,
-            )
-        except TypeError:
-            # NOTE: Does this ever occur?
-            logger.warning("LastItemPrediction does not support n_most_recent_in, using default")
-            scenario = LastItemPrediction(validation=True, seed=seed)
+        scenario = LastItemPrediction(
+            validation=True,
+            seed=seed,
+            n_most_recent_in=n_most_recent_in,
+        )
         scenario.split(interaction_matrix)
     except (ZeroDivisionError, ValueError) as e:
         logger.warning(f"Failed to create scenario split (likely insufficient data): {e}")
@@ -534,6 +531,12 @@ def run_evaluation(
     test_out_data = test_out.values
     # NOTE: Don't fully understand the used extract function.
     # What is the training data used for?
+    # ANSWER: _extract_validation_data gets (val_in, val_out) from the scenario's
+    # validation_data, or falls back to _build_validation_from_train(train_data) when
+    # the scenario doesn't expose it. train_data is used only in that fallback to
+    # hold out each user's last item as val_out. With LastItemPrediction(validation=True)
+    # the scenario provides validation_data, so the fallback is rarely used. 
+    # Validation_data is used for grid-search tuning and for MultVAE's fit(validation_data=...) early stopping.
     validation_data = _extract_validation_data(scenario, train_data)
 
     if test_out_data is None or test_out_data.nnz == 0:
@@ -546,46 +549,54 @@ def run_evaluation(
     logger.info(f"Using batch size: {batch_size} for prediction")
 
     # Resolve best params via grid search for algorithms with grid
+    # Only run grid search when validation data is available to avoid tuning on test set
     algorithm_grids = algorithm_grids or {}
     resolved_params = dict(algorithm_params)
-    # NOTE: this is the second time calling this method
-    available = get_available_algorithms(
-        include_content_based=(content_df is not None or embeddings_df is not None)
+
+    has_validation = (
+        validation_data is not None
+        and len(validation_data) == 2
+        and validation_data[1] is not None
+        and validation_data[1].nnz > 0
     )
-    eval_in = test_in_data
-    eval_out = test_out_data
-    # NOTE: are you sure validation data is available during experiments?
-    if validation_data is not None and len(validation_data) == 2:
+    if has_validation:
         val_in, val_out = validation_data
-        if val_out is not None and val_out.nnz > 0:
-            eval_in = val_in
-            eval_out = val_out
-            logger.info("Using validation set for grid search")
-    for algo_name in algorithms:
-        if algo_name not in available:
-            continue
-        grid = algorithm_grids.get(algo_name)
-        if not grid:
-            continue
-        algo_class = available[algo_name]
-        base_params = _resolve_algorithm_params(algo_name, algorithm_params, k_values, seed)
-        best = _run_grid_search(
-            algo_name=algo_name,
-            algo_class=algo_class,
-            grid=grid,
-            train_data=train_data,
-            eval_in=eval_in,
-            eval_out=eval_out,
-            base_params=base_params,
-            optimization_metric=optimization_metric,
-            optimization_k=optimization_k,
-            content_df=content_df,
-            item_mapping=item_mapping,
-            embeddings_df=embeddings_df,
-            embedding_column=embedding_column,
-            seed=seed,
-        )
-        resolved_params[algo_name] = best
+        eval_in, eval_out = val_in, val_out
+        logger.info("✅ Using validation set for grid search")
+
+    if has_validation:
+        for algo_name in algorithms:
+            if algo_name not in available:
+                continue
+            grid = algorithm_grids.get(algo_name)
+            if not grid:
+                continue
+            algo_class = available[algo_name]
+            base_params = _resolve_algorithm_params(algo_name, algorithm_params, k_values, seed)
+            best = _run_grid_search(
+                algo_name=algo_name,
+                algo_class=algo_class,
+                grid=grid,
+                train_data=train_data,
+                eval_in=eval_in,
+                eval_out=eval_out,
+                base_params=base_params,
+                optimization_metric=optimization_metric,
+                optimization_k=optimization_k,
+                content_df=content_df,
+                item_mapping=item_mapping,
+                embeddings_df=embeddings_df,
+                embedding_column=embedding_column,
+            )
+            resolved_params[algo_name] = best
+    else:
+        grids_requested = [a for a in algorithms if algorithm_grids.get(a)]
+        if grids_requested:
+            logger.warning(
+                "❌ Validation data unavailable; skipping grid search for %s. Using default params.",
+                grids_requested,
+            )
+
     algorithm_params = resolved_params
 
     # Instantiate algorithms.
@@ -651,7 +662,10 @@ def run_evaluation(
 
     # Evaluate all algorithms with batching
     # NOTE: coverage metric unused
-    from recpack.metrics import NDCGK, RecallK, PrecisionK, CoverageK
+    # ANSWER: We don't use RecPack's CoverageK here because we compute catalog coverage
+    # from the same accumulated top-k item exposure used for Gini/topic-diversity metrics,
+    # and this keeps memory usage low via batching (no need to materialize all predictions).
+    from recpack.metrics import NDCGK, RecallK, PrecisionK
     rows: List[Dict[str, Any]] = []
     topic_reports: List[Dict[str, Any]] = []
     per_user_rows: List[Dict[str, Any]] = []
@@ -688,6 +702,9 @@ def run_evaluation(
             # 2. Batched prediction and metric calculation
             # Initialize accumulators
             # NOTE: is there a risk of average of averages problems?
+            # ANSWER: I don't think so if metric.value is a per-user mean: we weigh each batch by
+            # batch_valid_users and divide by total_valid_users (risk only if RecPack
+            # would average over a different denominator, e.g., includes empty rows) -> @Lien do you agree?
             metric_sums = {}
             for k in k_values:
                 metric_sums[f'NDCGK_{k}'] = 0.0
@@ -1055,6 +1072,30 @@ def _save_topic_report_by_algorithm(
     logger.info(f"Saved topic report to {topic_report_path} ({len(by_algo)} tabs)")
 
 
+def _save_topic_report_global(
+    topic_reports: List[Dict[str, Any]],
+    output_dir: str,
+) -> None:
+    """Save global topic report to Excel with one tab per algorithm."""
+    by_algo: Dict[str, List[pd.DataFrame]] = {}
+    for tr in topic_reports:
+        algo = tr["algorithm"]
+        df = tr["report_df"].copy()
+        df["cluster_id"] = "global"
+        by_algo.setdefault(algo, []).append(df)
+
+    if not by_algo:
+        return
+
+    topic_report_path = Path(output_dir) / "topic_report_global.xlsx"
+    with pd.ExcelWriter(topic_report_path, engine='openpyxl') as writer:
+        for algo, dfs in sorted(by_algo.items()):
+            combined = pd.concat(dfs, ignore_index=True)
+            sheet_name = _sanitize_excel_sheet_name(algo)
+            combined.to_excel(writer, sheet_name=sheet_name, index=False)
+    logger.info(f"Saved global topic report to {topic_report_path} ({len(by_algo)} tabs)")
+
+
 def _evaluate_single_cluster(
     cluster_id: int,
     cluster_interactions: pd.DataFrame,
@@ -1212,6 +1253,7 @@ def run_cluster_evaluation_legacy_style(
     
     # Run evaluation once on full data with per-user metrics
     # NOTE: what are the topic reports? They are unused?
+    # ANSWER: Per-(algorithm, k) topic exposure ranking DataFrames from topic-diversity evaluation; in legacy mode they are now exported as topic_report_global.xlsx.
     results_df, topic_reports, per_user_df = run_evaluation(
         interaction_matrix,
         algorithms=algorithms,
@@ -1268,6 +1310,8 @@ def run_cluster_evaluation_legacy_style(
             global_path = Path(output_dir) / "global_results.csv"
             save_dataframe(results_df, str(global_path))
             logger.info(f"Saved global results (incl. diversity metrics) to {global_path}")
+            if topic_reports:
+                _save_topic_report_global(topic_reports, output_dir)
 
         # Legacy-format output: {Algorithm}_{k}.csv with user_id_ext, score (matches 00_legacy)
         legacy_dir = Path(output_dir) / "legacy_format"

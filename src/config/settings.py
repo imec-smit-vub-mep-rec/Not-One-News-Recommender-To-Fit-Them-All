@@ -60,6 +60,8 @@ class ClusteringConfig:
         legacy_features: If True, use the legacy feature set (disables per-category
                          proportions and time-of-day features, enables session behavior
                          features like avg_category_switches and avg_session_duration)
+        remove_top: Number of top outlier users (by L2 norm in scaled feature space)
+                    to remove before clustering
     """
     features: List[str] = field(default_factory=lambda: [
         'count_sessions',
@@ -83,6 +85,7 @@ class ClusteringConfig:
     min_impressions_per_user: int = 5
     k_selection_method: str = "elbow"
     legacy_features: bool = False
+    remove_top: int = 0
 
 
 @dataclass 
