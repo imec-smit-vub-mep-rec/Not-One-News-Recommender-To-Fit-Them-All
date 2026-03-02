@@ -164,6 +164,7 @@ def _derive_subscriber_from_paywall_metered(
         .astype(bool)
     )
 
+    # NOTE: this probably has no impact on DPG datasets, but why add deduced subscribers, when the field is explicitly available?
     if 'is_subscriber' in df.columns:
         existing = df.groupby('user_id')['is_subscriber'].any().reindex(user_ids, fill_value=False).astype(bool)
         user_subscriber = (existing | derived) & user_logged_in
@@ -420,6 +421,8 @@ def run_conversion(config: PipelineConfig, session: Session) -> tuple:
         logger.info("Converting impressions...")
         impressions_df = converter.convert_impressions()
 
+    # NOTE: How did you come to these subscriber deduction parameters? 1 paywall article is not that much ...
+    #       Why different for VK than AD / HLN (Does that impact the number of subscribers detected?)?
     # Keep logged-in and subscriber concepts disentangled:
     # - is_logged_in comes from impression auth state
     # - is_subscriber is derived from metered paywall behavior when available
@@ -1020,6 +1023,7 @@ def save_cluster_profiles_excel(
     Returns:
         Path to the written Excel file.
     """
+    # NOTE: Not sure you need to reimport these things. Just import at start, it's going to lead to fewer problems
     import numpy as np
     import pandas as pd
 
@@ -1172,6 +1176,7 @@ def run_clustering(
         logger.info("Using LEGACY feature set (no per-category proportions, no time-of-day, with session behavior features)")
     
     # Extract features (including homepage behavior - matching legacy clustering)
+    # NOTE: what do all the legacy things mean? And are the other things new compared to legacy? Is there overlap?
     extractor = UserFeatureExtractor(
         include_categories=True,
         include_time=True,
@@ -1187,6 +1192,8 @@ def run_clustering(
     
     # Optional: filter out top N outliers (by L2 norm in scaled space) to avoid degenerate clusters
     # this is needed to get meaningful results for AD and VK datasets
+    # NOTE: First mention of X_full in the entire repository
+    # NOTE, how is it Optional? Is it not going to always do this?
     outlier_scores = np.linalg.norm(X_full, axis=1)
     n_outliers = min(2, len(features_df) - 3)  # Keep at least 3 users for clustering
     if n_outliers > 0:
@@ -1226,6 +1233,7 @@ def run_clustering(
     per_cluster_silhouette = {}
     try:
         from sklearn.metrics import silhouette_samples
+        # NOTE: Don't think you should reimport numpy here
         import numpy as _np
 
         _max_sil_samples = 10_000
@@ -1392,6 +1400,7 @@ def run_evaluation(
         if algo.enabled and getattr(algo, "grid", None) and algo.grid
     }
     
+    # NOTE: Hard to follow the full config trail, is this set to True for the DPG experiments?
     train_on_full = getattr(config.evaluation, "train_on_full_dataset", True)
     
     if train_on_full:

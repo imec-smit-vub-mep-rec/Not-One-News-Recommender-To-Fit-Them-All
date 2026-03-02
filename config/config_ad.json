@@ -8,6 +8,7 @@
       "start_time_max": "2026-01-12T19:19:58.665Z"
     },
     "clustering": {
+      // You specify n_clusters = 4, but results only had 3, right? What creates that difference?
       "n_clusters": 4,
       "k_selection_method": "elbow",
       "legacy_features": true

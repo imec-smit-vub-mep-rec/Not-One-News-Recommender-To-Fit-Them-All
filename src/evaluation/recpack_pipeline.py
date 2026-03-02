@@ -160,6 +160,7 @@ def _run_grid_search(
     item_mapping: Optional[Dict],
     embeddings_df: Optional[pd.DataFrame],
     embedding_column: str,
+    # NOTE: seed is unused, is that important?
     seed: int,
 ) -> Dict[str, Any]:
     """Run grid search for an algorithm, return best params by optimization metric."""
@@ -474,6 +475,7 @@ def run_evaluation(
         embedding_column: Column name in embeddings_df containing the embedding vectors.
         batch_size: Batch size for prediction to avoid OOM errors.
         articles_df: Optional articles DataFrame with article_id and categories for topic-level metrics.
+        # NOTE: what does it mean to return per-user metrics? What's the alternative?
         return_per_user_metrics: If True, return per-user metrics for cluster aggregation.
         user_mapping: Dict mapping original user_id -> internal uid. Required when
                       return_per_user_metrics=True for mapping row indices to user_ids.
@@ -505,6 +507,7 @@ def run_evaluation(
     # This predicts the last item each user interacted with, using n_most_recent_in for training
     logger.info("Using LastItemPrediction scenario (n_most_recent_in=%d)", n_most_recent_in)
     
+    # NOTE: Why double try?
     try:
         try:
             scenario = LastItemPrediction(
@@ -513,6 +516,7 @@ def run_evaluation(
                 n_most_recent_in=n_most_recent_in,
             )
         except TypeError:
+            # NOTE: Does this ever occur?
             logger.warning("LastItemPrediction does not support n_most_recent_in, using default")
             scenario = LastItemPrediction(validation=True, seed=seed)
         scenario.split(interaction_matrix)
@@ -528,6 +532,8 @@ def run_evaluation(
     train_data = train_matrix.values
     test_in_data = test_in.values
     test_out_data = test_out.values
+    # NOTE: Don't fully understand the used extract function.
+    # What is the training data used for?
     validation_data = _extract_validation_data(scenario, train_data)
 
     if test_out_data is None or test_out_data.nnz == 0:
@@ -542,11 +548,13 @@ def run_evaluation(
     # Resolve best params via grid search for algorithms with grid
     algorithm_grids = algorithm_grids or {}
     resolved_params = dict(algorithm_params)
+    # NOTE: this is the second time calling this method
     available = get_available_algorithms(
         include_content_based=(content_df is not None or embeddings_df is not None)
     )
     eval_in = test_in_data
     eval_out = test_out_data
+    # NOTE: are you sure validation data is available during experiments?
     if validation_data is not None and len(validation_data) == 2:
         val_in, val_out = validation_data
         if val_out is not None and val_out.nnz > 0:
@@ -642,6 +650,7 @@ def run_evaluation(
         internal_to_original_user = {int(v): str(k) for k, v in user_mapping.items()}
 
     # Evaluate all algorithms with batching
+    # NOTE: coverage metric unused
     from recpack.metrics import NDCGK, RecallK, PrecisionK, CoverageK
     rows: List[Dict[str, Any]] = []
     topic_reports: List[Dict[str, Any]] = []
@@ -671,12 +680,14 @@ def run_evaluation(
                 else:
                     algo_instance.fit(train_data)
             elif hasattr(algo_instance, '_fit'):
+                # NOTE: why call an internal method?
                 algo_instance._fit(train_data)
             else:
                 raise AttributeError(f"{algo_instance.__class__.__name__} has no fit/_fit method")
             
             # 2. Batched prediction and metric calculation
             # Initialize accumulators
+            # NOTE: is there a risk of average of averages problems?
             metric_sums = {}
             for k in k_values:
                 metric_sums[f'NDCGK_{k}'] = 0.0
@@ -773,7 +784,7 @@ def run_evaluation(
             
             if total_valid_users > 0:
                 for k in k_values:
-                    # Average metrics
+                    # Average metrics 
                     row[f'NDCGK_{k}'] = metric_sums[f'NDCGK_{k}'] / total_valid_users
                     row[f'RecallK_{k}'] = metric_sums[f'RecallK_{k}'] / total_valid_users
                     row[f'PrecisionK_{k}'] = metric_sums[f'PrecisionK_{k}'] / total_valid_users
@@ -1200,6 +1211,7 @@ def run_cluster_evaluation_legacy_style(
         return {}
     
     # Run evaluation once on full data with per-user metrics
+    # NOTE: what are the topic reports? They are unused?
     results_df, topic_reports, per_user_df = run_evaluation(
         interaction_matrix,
         algorithms=algorithms,
