@@ -2,8 +2,8 @@
 Plot sessions-per-user distribution by cluster for a pipeline run.
 
 Loads user_clusters.parquet and impressions_cleaned.parquet from a run directory,
-computes sessions per user, and displays a probability histogram colored by cluster.
-The x-axis is clipped to the 99th percentile for readability.
+computes sessions per user, and exports a probability histogram colored by cluster
+as an image. The x-axis is clipped to the 99th percentile for readability.
 """
 
 import argparse
@@ -28,7 +28,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
-    """Load run data, plot sessions-per-user by cluster, and display the figure."""
+    """Load run data, plot sessions-per-user by cluster, and export the figure as an image."""
     args = parse_args()
     run_dir = args.run_dir
 
@@ -65,7 +65,11 @@ def main() -> None:
     plt.xlim(0, x_max)
     plt.grid(axis="y", alpha=0.3)
     plt.tight_layout()
-    plt.show()
+
+    out_path = run_dir / "sessions_per_user_by_cluster.png"
+    plt.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"Saved plot to {out_path}")
 
 
 if __name__ == "__main__":
