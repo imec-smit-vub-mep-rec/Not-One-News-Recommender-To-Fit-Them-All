@@ -3,7 +3,8 @@ Plot sessions-per-user distribution by cluster for a pipeline run.
 
 Loads user_clusters.parquet and impressions_cleaned.parquet from a run directory,
 computes sessions per user, and exports a probability histogram colored by cluster
-as an image. The x-axis is clipped to the 99th percentile for readability.
+as an image. Uses integer-width bins within the visible range (99th percentile),
+unfilled step lines for clarity, and optionally a log-scale x-axis.
 """
 
 import argparse
@@ -23,6 +24,11 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         required=True,
         help="Path to the pipeline run directory containing user_clusters.parquet and impressions_cleaned.parquet",
+    )
+    parser.add_argument(
+        "--log-x",
+        action="store_true",
+        help="Use log scale for the x-axis (number of sessions)",
     )
     return parser.parse_args()
 
@@ -46,6 +52,7 @@ def main() -> None:
 
     plot_df = pd.merge(clusters_df, sessions_per_user, on="user_id")
     x_max = plot_df["num_sessions"].quantile(0.99)
+    x_min = 1 if args.log_x else 0
 
     plt.figure(figsize=(12, 7))
     sns.histplot(
@@ -53,16 +60,21 @@ def main() -> None:
         x="num_sessions",
         hue="cluster_id",
         element="step",
+        fill=False,
+        linewidth=2,
         stat="probability",
         common_norm=False,
-        bins=30,
+        binwidth=1,
+        binrange=(x_min, x_max),
         palette="tab10",
     )
 
     plt.title("Distribution of Number of Sessions per User by Cluster")
-    plt.xlabel("Number of Sessions")
+    plt.xlabel("Number of Sessions" + (" (log scale)" if args.log_x else ""))
     plt.ylabel("Probability")
-    plt.xlim(0, x_max)
+    if args.log_x:
+        plt.xscale("log")
+    plt.xlim(x_min, x_max)
     plt.grid(axis="y", alpha=0.3)
     plt.tight_layout()
 
