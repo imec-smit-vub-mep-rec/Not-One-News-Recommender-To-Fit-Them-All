@@ -16,6 +16,7 @@ import argparse
 import sys
 from pathlib import Path
 from datetime import datetime
+from dataclasses import asdict
 import ast
 import json
 import gc
@@ -35,151 +36,6 @@ from src.clustering.clustering import get_cluster_statistics
 
 
 logger = get_logger("pipeline")
-
-
-def _parse_embedding(raw_value):
-    """Parse embedding values from article metadata into list[float]."""
-    if raw_value is None:
-        return None
-    text = str(raw_value).strip()
-    if not text:
-        return None
-
-    # JSON-style arrays
-    try:
-        parsed = json.loads(text)
-        if isinstance(parsed, list) and parsed:
-            return [float(x) for x in parsed]
-    except Exception:
-        pass
-
-    # Python literal arrays/tuples
-    try:
-        parsed = ast.literal_eval(text)
-        if isinstance(parsed, (list, tuple)) and parsed:
-            return [float(x) for x in parsed]
-    except Exception:
-        pass
-
-    # Space-separated values in bracketed strings
-    cleaned = text.strip("[]")
-    values = []
-    for token in cleaned.replace(",", " ").split():
-        try:
-            values.append(float(token))
-        except ValueError:
-            continue
-    return values if values else None
-
-
-def _save_session_embeddings_if_available(articles_df, config: PipelineConfig, session: Session):
-    """
-    Save session-local title_category_embeddings.parquet if AD raw embeddings exist.
-
-    This keeps evaluation logic local-file based and avoids direct S3 Path.exists checks.
-    """
-    if config.dataset.name not in ("ad", "hln", "vk"):
-        return
-    if "bert_embedding" not in articles_df.columns:
-        logger.info("AD dataset detected but no 'bert_embedding' column found in articles")
-        return
-
-    parsed = articles_df["bert_embedding"].map(_parse_embedding)
-    valid_mask = parsed.notna()
-    if not valid_mask.any():
-        logger.warning("No valid embeddings parsed from 'bert_embedding' column")
-        return
-
-    embeddings_df = articles_df.loc[valid_mask, ["article_id"]].copy()
-    embeddings_df["article_id"] = embeddings_df["article_id"].astype(str)
-    embeddings_df["embedding"] = parsed.loc[valid_mask]
-
-    # Keep only rows with consistent embedding length
-    lengths = embeddings_df["embedding"].map(len)
-    target_dim = int(lengths.mode().iloc[0])
-    consistent_mask = lengths.eq(target_dim)
-    dropped = int((~consistent_mask).sum())
-    if dropped:
-        logger.warning(
-            f"Dropping {dropped} embedding rows with non-standard dimension (target={target_dim})"
-        )
-        embeddings_df = embeddings_df.loc[consistent_mask].copy()
-
-    embedding_path = session.get_path("title_category_embeddings.parquet")
-    save_dataframe(embeddings_df, embedding_path)
-    logger.info(
-        f"Saved {len(embeddings_df)} session embeddings to {embedding_path} "
-        f"(dimension={target_dim})"
-    )
-
-
-def _derive_subscriber_from_paywall_metered(
-    impressions_df,
-    articles_df,
-    min_paywall_reads: int = 2,
-    min_read_time_seconds: float = 30.0,
-):
-    """Derive user-level subscriber flags from metered paywall behavior.
-
-    A user is marked subscriber when they have at least ``min_paywall_reads``
-    impressions on paywalled articles with ``read_time`` strictly greater than
-    ``min_read_time_seconds`` and the qualifying impressions are from logged-in users.
-    """
-    import pandas as pd
-
-    if articles_df is None or impressions_df is None:
-        return impressions_df
-    if 'article_id' not in impressions_df.columns or 'user_id' not in impressions_df.columns:
-        return impressions_df
-    if 'article_id' not in articles_df.columns or 'is_paywall' not in articles_df.columns:
-        return impressions_df
-
-    df = impressions_df.copy()
-    lookup = articles_df[['article_id', 'is_paywall']].drop_duplicates(subset='article_id').copy()
-    lookup['is_paywall'] = lookup['is_paywall'].fillna(False).astype(bool)
-
-    if 'is_logged_in' not in df.columns:
-        df['is_logged_in'] = False
-
-    merged = df[['user_id', 'article_id', 'read_time', 'is_logged_in']].merge(
-        lookup, on='article_id', how='left'
-    )
-    read_time = pd.to_numeric(merged['read_time'], errors='coerce').fillna(0.0)
-    logged_in = merged['is_logged_in'].fillna(False).astype(bool)
-    qualifying = (
-        merged['is_paywall'].fillna(False)
-        & (read_time > float(min_read_time_seconds))
-        & logged_in
-    )
-
-    qualifying_counts = merged.loc[qualifying].groupby('user_id').size()
-    derived = qualifying_counts >= int(min_paywall_reads)
-    derived = derived.astype(bool)
-
-    user_ids = df['user_id'].dropna().astype(str).unique()
-    derived = derived.reindex(user_ids, fill_value=False)
-    user_logged_in = (
-        df.groupby('user_id')['is_logged_in']
-        .any()
-        .reindex(user_ids, fill_value=False)
-        .astype(bool)
-    )
-
-    # NOTE: this probably has no impact on DPG datasets, but why add deduced subscribers, when the field is explicitly available?
-    # ANSWER: can you point me to thefield in the data that indicates whether a user is a subscriber?
-    if 'is_subscriber' in df.columns:
-        existing = df.groupby('user_id')['is_subscriber'].any().reindex(user_ids, fill_value=False).astype(bool)
-        user_subscriber = (existing | derived) & user_logged_in
-    else:
-        user_subscriber = derived & user_logged_in
-
-    df['is_subscriber'] = df['user_id'].map(user_subscriber).fillna(False).astype(bool)
-    logger.info(
-        "Derived subscriber status from metered paywall: "
-        f"{int(user_subscriber.sum())}/{len(user_subscriber)} users"
-    )
-    return df
-
 
 def parse_args():
     """Parse command line arguments."""
@@ -383,6 +239,10 @@ def load_or_create_config(args) -> PipelineConfig:
         config.clustering.remove_top = args.remove_top
         logger.info(f"CLI override: clustering.remove_top = {args.remove_top}")
 
+    if args.full_content:
+        logger.warning("--full-content is deprecated; use --content-mode full")
+        config.evaluation.content_mode = "full"
+        logger.info("CLI override: evaluation.content_mode = full")
     if args.content_mode:
         config.evaluation.content_mode = args.content_mode
         logger.info(f"CLI override: evaluation.content_mode = {args.content_mode}")
@@ -395,6 +255,35 @@ def load_or_create_config(args) -> PipelineConfig:
         raise ValueError("clustering.remove_top must be >= 0")
     
     return config
+
+
+def _iter_flat_config_leaves(value, prefix: str = ""):
+    """Yield dotted config paths and leaf values from nested dict/list config data."""
+    if isinstance(value, dict):
+        for key in sorted(value.keys()):
+            child_prefix = f"{prefix}.{key}" if prefix else str(key)
+            yield from _iter_flat_config_leaves(value[key], child_prefix)
+        return
+
+    if isinstance(value, list):
+        for index, item in enumerate(value):
+            child_prefix = f"{prefix}[{index}]"
+            yield from _iter_flat_config_leaves(item, child_prefix)
+        return
+
+    yield prefix, value
+
+
+def log_resolved_config(config: PipelineConfig) -> None:
+    """Log resolved runtime parameters in one canonical block."""
+    config_dict = asdict(config)
+
+    logger.info("=" * 60)
+    logger.info("RESOLVED CONFIGURATION")
+    logger.info("=" * 60)
+    for key, leaf_value in _iter_flat_config_leaves(config_dict):
+        logger.info(f"{key}: {leaf_value}")
+    logger.info("=" * 60)
 
 
 def run_conversion(config: PipelineConfig, session: Session) -> tuple:
@@ -473,7 +362,6 @@ def run_preprocessing(
     impressions_df,
     config: PipelineConfig,
     session: Session,
-    content_mode: str = "legacy",
 ) -> tuple:
     """Run preprocessing step for CLUSTERING.
     
@@ -534,6 +422,7 @@ def run_preprocessing(
     logger.info(f"NOTE: interactions.csv excludes homepage views (for RecPack evaluation)")
     
     # Create article content for content-based unless embeddings-only mode is selected.
+    content_mode = config.evaluation.content_mode
     if content_mode == "embeddings":
         logger.info("Skipping content generation (EMBEDDINGS mode uses pre-calculated vectors)")
     else:
@@ -544,6 +433,151 @@ def run_preprocessing(
         logger.info(f"Saved article content to {content_path}")
     
     return cleaned_articles, cleaned_impressions, interactions_df
+
+
+
+def _parse_embedding(raw_value):
+    """Parse embedding values from article metadata into list[float]."""
+    if raw_value is None:
+        return None
+    text = str(raw_value).strip()
+    if not text:
+        return None
+
+    # JSON-style arrays
+    try:
+        parsed = json.loads(text)
+        if isinstance(parsed, list) and parsed:
+            return [float(x) for x in parsed]
+    except Exception:
+        pass
+
+    # Python literal arrays/tuples
+    try:
+        parsed = ast.literal_eval(text)
+        if isinstance(parsed, (list, tuple)) and parsed:
+            return [float(x) for x in parsed]
+    except Exception:
+        pass
+
+    # Space-separated values in bracketed strings
+    cleaned = text.strip("[]")
+    values = []
+    for token in cleaned.replace(",", " ").split():
+        try:
+            values.append(float(token))
+        except ValueError:
+            continue
+    return values if values else None
+
+
+def _save_session_embeddings_if_available(articles_df, config: PipelineConfig, session: Session):
+    """
+    Save session-local title_category_embeddings.parquet if AD raw embeddings exist.
+
+    This keeps evaluation logic local-file based and avoids direct S3 Path.exists checks.
+    """
+    if config.dataset.name not in ("ad", "hln", "vk"):
+        return
+    if "bert_embedding" not in articles_df.columns:
+        logger.info("AD dataset detected but no 'bert_embedding' column found in articles")
+        return
+
+    parsed = articles_df["bert_embedding"].map(_parse_embedding)
+    valid_mask = parsed.notna()
+    if not valid_mask.any():
+        logger.warning("No valid embeddings parsed from 'bert_embedding' column")
+        return
+
+    embeddings_df = articles_df.loc[valid_mask, ["article_id"]].copy()
+    embeddings_df["article_id"] = embeddings_df["article_id"].astype(str)
+    embeddings_df["embedding"] = parsed.loc[valid_mask]
+
+    # Keep only rows with consistent embedding length
+    lengths = embeddings_df["embedding"].map(len)
+    target_dim = int(lengths.mode().iloc[0])
+    consistent_mask = lengths.eq(target_dim)
+    dropped = int((~consistent_mask).sum())
+    if dropped:
+        logger.warning(
+            f"Dropping {dropped} embedding rows with non-standard dimension (target={target_dim})"
+        )
+        embeddings_df = embeddings_df.loc[consistent_mask].copy()
+
+    embedding_path = session.get_path("title_category_embeddings.parquet")
+    save_dataframe(embeddings_df, embedding_path)
+    logger.info(
+        f"Saved {len(embeddings_df)} session embeddings to {embedding_path} "
+        f"(dimension={target_dim})"
+    )
+
+
+def _derive_subscriber_from_paywall_metered(
+    impressions_df,
+    articles_df,
+    min_paywall_reads: int = 2,
+    min_read_time_seconds: float = 30.0,
+):
+    """Derive user-level subscriber flags from metered paywall behavior.
+
+    A user is marked subscriber when they have at least ``min_paywall_reads``
+    impressions on paywalled articles with ``read_time`` strictly greater than
+    ``min_read_time_seconds`` and the qualifying impressions are from logged-in users.
+    """
+    import pandas as pd
+
+    if articles_df is None or impressions_df is None:
+        return impressions_df
+    if 'article_id' not in impressions_df.columns or 'user_id' not in impressions_df.columns:
+        return impressions_df
+    if 'article_id' not in articles_df.columns or 'is_paywall' not in articles_df.columns:
+        return impressions_df
+
+    df = impressions_df.copy()
+    lookup = articles_df[['article_id', 'is_paywall']].drop_duplicates(subset='article_id').copy()
+    lookup['is_paywall'] = lookup['is_paywall'].fillna(False).astype(bool)
+
+    if 'is_logged_in' not in df.columns:
+        df['is_logged_in'] = False
+
+    merged = df[['user_id', 'article_id', 'read_time', 'is_logged_in']].merge(
+        lookup, on='article_id', how='left'
+    )
+    read_time = pd.to_numeric(merged['read_time'], errors='coerce').fillna(0.0)
+    logged_in = merged['is_logged_in'].fillna(False).astype(bool)
+    qualifying = (
+        merged['is_paywall'].fillna(False)
+        & (read_time > float(min_read_time_seconds))
+        & logged_in
+    )
+
+    qualifying_counts = merged.loc[qualifying].groupby('user_id').size()
+    derived = qualifying_counts >= int(min_paywall_reads)
+    derived = derived.astype(bool)
+
+    user_ids = df['user_id'].dropna().astype(str).unique()
+    derived = derived.reindex(user_ids, fill_value=False)
+    user_logged_in = (
+        df.groupby('user_id')['is_logged_in']
+        .any()
+        .reindex(user_ids, fill_value=False)
+        .astype(bool)
+    )
+
+    # NOTE: this probably has no impact on DPG datasets, but why add deduced subscribers, when the field is explicitly available?
+    # ANSWER: can you point me to thefield in the data that indicates whether a user is a subscriber?
+    if 'is_subscriber' in df.columns:
+        existing = df.groupby('user_id')['is_subscriber'].any().reindex(user_ids, fill_value=False).astype(bool)
+        user_subscriber = (existing | derived) & user_logged_in
+    else:
+        user_subscriber = derived & user_logged_in
+
+    df['is_subscriber'] = df['user_id'].map(user_subscriber).fillna(False).astype(bool)
+    logger.info(
+        "Derived subscriber status from metered paywall: "
+        f"{int(user_subscriber.sum())}/{len(user_subscriber)} users"
+    )
+    return df
 
 
 def _compute_cluster_summary(
@@ -1172,7 +1206,6 @@ def run_clustering(
     articles_df,
     config: PipelineConfig,
     session: Session,
-    remove_top: int = 0,
 ) -> tuple:
     """Run clustering step on ALL users.
     
@@ -1188,7 +1221,7 @@ def run_clustering(
     logger.info("=" * 60)
     
     # Check if legacy features mode is enabled
-    legacy_mode = getattr(config.clustering, 'legacy_features', False)
+    legacy_mode = config.clustering.legacy_features
     if legacy_mode:
         logger.info("Using LEGACY feature set (no per-category proportions, no time-of-day, with session behavior features)")
     
@@ -1210,6 +1243,7 @@ def run_clustering(
     
     # Optional: filter out top N outliers (by L2 norm in scaled space).
     X = extractor.get_feature_matrix(features_df)
+    remove_top = config.clustering.remove_top
     removed_outliers_summary = []
     if remove_top > 0:
         n_outliers = min(remove_top, len(features_df) - 3)  # Keep at least 3 users for clustering
@@ -1250,9 +1284,15 @@ def run_clustering(
     # Cluster
     clusterer = KMeansClusterer(
         n_clusters=config.clustering.n_clusters,
-        k_range=range(1, 11),
+        k_range=range(1, config.clustering.max_clusters + 1),
         k_selection_method=config.clustering.k_selection_method,
         random_state=config.clustering.random_state,
+        n_init=config.clustering.n_init,
+        use_minibatch=config.clustering.use_minibatch,
+        minibatch_threshold=config.clustering.minibatch_threshold,
+        batch_size=config.clustering.batch_size,
+        n_jobs=config.clustering.n_jobs,
+        silhouette_sample_size=config.clustering.silhouette_sample_size,
     )
     
     labels = clusterer.fit_predict(X)
@@ -1266,7 +1306,9 @@ def run_clustering(
     save_dataframe(users_df, session.get_path("user_clusters.csv"), format="csv")
     
     # Evaluate clustering
-    eval_metrics = clusterer.evaluate(X)
+    eval_metrics = clusterer.evaluate(
+        X, silhouette_sample_size=config.clustering.silhouette_sample_size
+    )
     logger.info(f"Clustering evaluation: {eval_metrics}")
 
     # Per-cluster silhouette scores — use subsample to avoid O(n²) on full dataset
@@ -1274,10 +1316,10 @@ def run_clustering(
     try:
         from sklearn.metrics import silhouette_samples
 
-        _max_sil_samples = 10_000
+        _max_sil_samples = config.clustering.silhouette_sample_size
         _n = len(labels)
-        if _n > _max_sil_samples:
-            _rng = np.random.RandomState(42)
+        if _max_sil_samples and _n > _max_sil_samples:
+            _rng = np.random.RandomState(config.clustering.random_state)
             _idx = _rng.choice(_n, _max_sil_samples, replace=False)
             _X_sub, _labels_sub = X[_idx], labels[_idx]
             logger.info(f"Computing per-cluster silhouette on subsample of {_max_sil_samples} (full: {_n})")
@@ -1338,7 +1380,6 @@ def run_evaluation(
     content_df,
     config: PipelineConfig,
     session: Session,
-    content_mode: str = "legacy",
 ) -> dict:
     """Run evaluation step.
     
@@ -1369,6 +1410,7 @@ def run_evaluation(
         return {}
     
     log_memory("evaluation start")
+    content_mode = config.evaluation.content_mode
 
     # Check for pre-calculated embeddings file (REQUIRED for CB-ST)
     embeddings_df = None
@@ -1441,7 +1483,7 @@ def run_evaluation(
     
     # NOTE: Hard to follow the full config trail, is this set to True for the DPG experiments?
     # ANSWER: Yes, otherwise it trains a separate model per cluster, which is not what we want for the DPG experiments (how does one model perform on the different clusters?)
-    train_on_full = getattr(config.evaluation, "train_on_full_dataset", True)
+    train_on_full = config.evaluation.train_on_full_dataset
     
     if train_on_full:
         # Legacy-style: train once on full dataset, aggregate metrics per cluster
@@ -1459,9 +1501,9 @@ def run_evaluation(
             output_dir=results_dir,
             embeddings_df=embeddings_df,
             embedding_column=embedding_column,
-            n_most_recent_in=getattr(config.evaluation, "n_most_recent_in", 30),
-            optimization_metric=getattr(config.evaluation, "optimization_metric", "NDCGK"),
-            optimization_k=getattr(config.evaluation, "optimization_k", 100),
+            n_most_recent_in=config.evaluation.n_most_recent_in,
+            optimization_metric=config.evaluation.optimization_metric,
+            optimization_k=config.evaluation.optimization_k,
         )
     else:
         # Per-cluster training: train a separate model per cluster
@@ -1524,41 +1566,13 @@ def main():
         logger.error(f"Failed to load config: {e}")
         sys.exit(1)
     
-    # Log feature configuration
-    logger.info("=" * 60)
-    logger.info("CONFIGURATION SUMMARY")
-    logger.info("=" * 60)
-    logger.info(f"Dataset: {config.dataset.name}")
-    logger.info(f"Input path: {config.dataset.input_path}")
-    legacy_features = getattr(config.clustering, 'legacy_features', False)
-    if legacy_features:
-        logger.info("Feature mode: LEGACY (session behavior features, no per-category proportions, no time-of-day)")
-    else:
-        logger.info("Feature mode: MODERN (includes per-category proportions, time-of-day, entropy/gini)")
-    logger.info(f"N clusters: {config.clustering.n_clusters or 'auto-detect'}")
-    logger.info(f"K selection method: {config.clustering.k_selection_method}")
-    logger.info(f"🗑️ Outlier removal (top N): {config.clustering.remove_top}")
-    content_mode = getattr(config.evaluation, "content_mode", "legacy")
-    if args.full_content:
-        logger.warning("--full-content is deprecated; use --content-mode full")
-        content_mode = "full"
-    if args.content_mode:
-        content_mode = args.content_mode
 
-    if content_mode == "full":
-        logger.info("CB-ST content: FULL (category + title + body)")
-    elif content_mode == "embeddings":
-        logger.info("CB-ST content: EMBEDDINGS (pre-calculated bert_embedding)")
-    else:
-        logger.info("CB-ST content: LEGACY (category + title only)")
-    train_on_full = getattr(config.evaluation, "train_on_full_dataset", True)
-    logger.info(
-        f"Evaluation mode: {'LEGACY (train on full, aggregate per cluster)' if train_on_full else 'PER-CLUSTER (train separate model per cluster)'}"
-    )
-    logger.info("=" * 60)
     
     # Create session using the config
     session = Session(config=config)
+
+    # Log resolved runtime parameters in one canonical block.
+    log_resolved_config(config)
     
     logger.info(f"Session directory: {session.session_dir}")
     
@@ -1577,7 +1591,6 @@ def main():
         # Step 2: Preprocessing
         articles_df, impressions_df, interactions_df = run_preprocessing(
             articles_df, impressions_df, config, session,
-            content_mode=content_mode,
         )
         gc.collect()
         
@@ -1587,7 +1600,7 @@ def main():
             users_df = load_dataframe(session.get_path("user_clusters.parquet"))
         else:
             features_df, labels, cluster_info = run_clustering(
-                impressions_df, articles_df, config, session, remove_top=config.clustering.remove_top
+                impressions_df, articles_df, config, session
             )
             removed_outliers = cluster_info.get("removed_outliers", [])
             if removed_outliers:
@@ -1609,10 +1622,10 @@ def main():
         # Step 4: Evaluation
         if not args.skip_evaluation:
             content_df = None
-            if content_mode != "embeddings":
+            if config.evaluation.content_mode != "embeddings":
                 content_df = load_dataframe(session.get_path("articles_content.csv"))
             results = run_evaluation(
-                interactions_df, users_df, content_df, config, session, content_mode=content_mode
+                interactions_df, users_df, content_df, config, session
             )
             del results
             if content_df is not None:

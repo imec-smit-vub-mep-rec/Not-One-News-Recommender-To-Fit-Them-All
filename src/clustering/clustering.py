@@ -17,16 +17,37 @@ from ..utils.logging import get_logger
 
 logger = get_logger("clustering.clustering")
 
+# Single source of truth for clustering defaults.
+DEFAULT_K_RANGE = range(1, 11)
+DEFAULT_K_SELECTION_METHOD = "elbow"
+DEFAULT_RANDOM_STATE = 42
+DEFAULT_N_INIT = 10
+DEFAULT_N_JOBS = -1
+DEFAULT_USE_MINIBATCH = False
+DEFAULT_MINIBATCH_THRESHOLD = 50_000
+DEFAULT_BATCH_SIZE = 2048
+DEFAULT_SILHOUETTE_SAMPLE_SIZE = 10_000
+
+
+def _log_resolved_clustering_params(params: Dict[str, Any]) -> None:
+    """Log resolved clustering parameters in a deterministic order."""
+    logger.info("-" * 60)
+    logger.info("RESOLVED CLUSTERING PARAMETERS")
+    logger.info("-" * 60)
+    for key in sorted(params):
+        logger.info(f"{key}: {params[key]}")
+    logger.info("-" * 60)
+
 
 def _fit_kmeans_for_k(
     X: np.ndarray,
     k: int,
     random_state: int,
     n_init: int,
-    use_minibatch: bool = False,
-    batch_size: int = 2048,
+    use_minibatch: bool = DEFAULT_USE_MINIBATCH,
+    batch_size: int = DEFAULT_BATCH_SIZE,
     compute_extra_metrics: bool = True,
-    silhouette_sample_size: int = 10000,
+    silhouette_sample_size: int = DEFAULT_SILHOUETTE_SAMPLE_SIZE,
 ) -> Dict[str, Any]:
     """Fit KMeans for a single k value and compute metrics.
     
@@ -84,14 +105,15 @@ def _fit_kmeans_for_k(
 
 def find_optimal_k(
     X: np.ndarray,
-    k_range: range = range(1, 11),
-    method: str = 'elbow',
-    random_state: int = 42,
-    n_init: int = 10,
-    n_jobs: int = -1,
-    use_minibatch: bool = False,
-    minibatch_threshold: int = 50000,
-    batch_size: int = 2048,
+    k_range: range = DEFAULT_K_RANGE,
+    method: str = DEFAULT_K_SELECTION_METHOD,
+    random_state: int = DEFAULT_RANDOM_STATE,
+    n_init: int = DEFAULT_N_INIT,
+    n_jobs: int = DEFAULT_N_JOBS,
+    use_minibatch: bool = DEFAULT_USE_MINIBATCH,
+    minibatch_threshold: int = DEFAULT_MINIBATCH_THRESHOLD,
+    batch_size: int = DEFAULT_BATCH_SIZE,
+    silhouette_sample_size: int = DEFAULT_SILHOUETTE_SAMPLE_SIZE,
 ) -> Tuple[int, Dict[str, Any]]:
     """Find optimal number of clusters.
     
@@ -123,7 +145,10 @@ def find_optimal_k(
     compute_extra = method != 'elbow'
     extra_info = ""
     if compute_extra:
-        extra_info = " (with silhouette/CH/DB metrics, silhouette subsampled to 10k)"
+        extra_info = (
+            f" (with silhouette/CH/DB metrics, silhouette subsampled to "
+            f"{silhouette_sample_size:,})"
+        )
     else:
         extra_info = " (inertia only — skipping O(n²) silhouette for speed)"
     logger.info(f"Finding optimal k in range {k_list} using {method} method (parallel, n_jobs={n_jobs}){extra_info}...")
@@ -133,7 +158,7 @@ def find_optimal_k(
         delayed(_fit_kmeans_for_k)(
             X, k, random_state, n_init, use_minibatch, batch_size,
             compute_extra_metrics=compute_extra,
-            silhouette_sample_size=10000,
+            silhouette_sample_size=silhouette_sample_size,
         )
         for k in k_list
     )
@@ -205,11 +230,11 @@ def find_optimal_k(
 def cluster_users(
     X: np.ndarray,
     n_clusters: int,
-    random_state: int = 42,
-    n_init: int = 10,
+    random_state: int = DEFAULT_RANDOM_STATE,
+    n_init: int = DEFAULT_N_INIT,
     use_minibatch: Optional[bool] = None,
-    batch_size: int = 2048,
-    auto_minibatch_threshold: int = 50000,
+    batch_size: int = DEFAULT_BATCH_SIZE,
+    auto_minibatch_threshold: int = DEFAULT_MINIBATCH_THRESHOLD,
 ) -> Tuple[np.ndarray, Any]:
     """Cluster users using K-Means.
     
@@ -350,11 +375,15 @@ class KMeansClusterer:
     def __init__(
         self,
         n_clusters: Optional[int] = None,
-        k_range: range = range(1, 11),
-        k_selection_method: str = 'elbow',
-        random_state: int = 42,
-        n_init: int = 10,
-        use_minibatch: bool = False,
+        k_range: range = DEFAULT_K_RANGE,
+        k_selection_method: str = DEFAULT_K_SELECTION_METHOD,
+        random_state: int = DEFAULT_RANDOM_STATE,
+        n_init: int = DEFAULT_N_INIT,
+        use_minibatch: bool = DEFAULT_USE_MINIBATCH,
+        minibatch_threshold: int = DEFAULT_MINIBATCH_THRESHOLD,
+        batch_size: int = DEFAULT_BATCH_SIZE,
+        n_jobs: int = DEFAULT_N_JOBS,
+        silhouette_sample_size: int = DEFAULT_SILHOUETTE_SAMPLE_SIZE,
     ):
         """Initialize the clusterer.
         
@@ -365,6 +394,10 @@ class KMeansClusterer:
             random_state: Random state
             n_init: Number of initializations
             use_minibatch: Whether to use MiniBatchKMeans
+            minibatch_threshold: Auto-enable MiniBatch if samples exceed threshold
+            batch_size: Batch size for MiniBatchKMeans
+            n_jobs: Number of parallel jobs for K-selection
+            silhouette_sample_size: Subsample size for silhouette metrics
         """
         self.n_clusters = n_clusters
         self.k_range = k_range
@@ -372,6 +405,10 @@ class KMeansClusterer:
         self.random_state = random_state
         self.n_init = n_init
         self.use_minibatch = use_minibatch
+        self.minibatch_threshold = minibatch_threshold
+        self.batch_size = batch_size
+        self.n_jobs = n_jobs
+        self.silhouette_sample_size = silhouette_sample_size
         
         self.model: Optional[Any] = None
         self.labels_: Optional[np.ndarray] = None
@@ -387,6 +424,21 @@ class KMeansClusterer:
         Returns:
             Self
         """
+        _log_resolved_clustering_params(
+            {
+                "n_clusters": self.n_clusters if self.n_clusters is not None else "auto",
+                "k_range": list(self.k_range),
+                "k_selection_method": self.k_selection_method,
+                "random_state": self.random_state,
+                "n_init": self.n_init,
+                "use_minibatch": self.use_minibatch,
+                "minibatch_threshold": self.minibatch_threshold,
+                "batch_size": self.batch_size,
+                "n_jobs": self.n_jobs,
+                "silhouette_sample_size": self.silhouette_sample_size,
+            }
+        )
+
         # Auto-select k if not specified
         if self.n_clusters is None:
             optimal_k, self.metrics_ = find_optimal_k(
@@ -395,6 +447,11 @@ class KMeansClusterer:
                 method=self.k_selection_method,
                 random_state=self.random_state,
                 n_init=self.n_init,
+                n_jobs=self.n_jobs,
+                use_minibatch=self.use_minibatch,
+                minibatch_threshold=self.minibatch_threshold,
+                batch_size=self.batch_size,
+                silhouette_sample_size=self.silhouette_sample_size,
             )
             self.n_clusters = optimal_k
         
@@ -405,6 +462,8 @@ class KMeansClusterer:
             random_state=self.random_state,
             n_init=self.n_init,
             use_minibatch=self.use_minibatch,
+            batch_size=self.batch_size,
+            auto_minibatch_threshold=self.minibatch_threshold,
         )
         
         self.is_fitted = True
@@ -460,7 +519,11 @@ class KMeansClusterer:
             return {}
         return self.metrics_.copy()
     
-    def evaluate(self, X: np.ndarray, silhouette_sample_size: int = 10000) -> Dict[str, float]:
+    def evaluate(
+        self,
+        X: np.ndarray,
+        silhouette_sample_size: Optional[int] = None,
+    ) -> Dict[str, float]:
         """Evaluate clustering quality.
         
         Args:
@@ -481,6 +544,8 @@ class KMeansClusterer:
         }
         
         if self.n_clusters > 1:
+            if silhouette_sample_size is None:
+                silhouette_sample_size = self.silhouette_sample_size
             # Silhouette score is O(n²) — subsample for large datasets
             sil_sample = silhouette_sample_size if (silhouette_sample_size and len(X) > silhouette_sample_size) else None
             if sil_sample:

@@ -62,6 +62,12 @@ class ClusteringConfig:
                          features like avg_category_switches and avg_session_duration)
         remove_top: Number of top outlier users (by L2 norm in scaled feature space)
                     to remove before clustering
+        n_init: Number of KMeans initializations
+        use_minibatch: Whether to use MiniBatchKMeans for final clustering
+        minibatch_threshold: Auto-enable MiniBatch when samples exceed threshold
+        batch_size: Batch size for MiniBatchKMeans
+        n_jobs: Number of parallel jobs for k-selection
+        silhouette_sample_size: Subsample size used for silhouette metrics
     """
     features: List[str] = field(default_factory=lambda: [
         'count_sessions',
@@ -86,6 +92,12 @@ class ClusteringConfig:
     k_selection_method: str = "elbow"
     legacy_features: bool = False
     remove_top: int = 0
+    n_init: int = 10
+    use_minibatch: bool = False
+    minibatch_threshold: int = 50000
+    batch_size: int = 2048
+    n_jobs: int = -1
+    silhouette_sample_size: int = 10000
 
 
 @dataclass 

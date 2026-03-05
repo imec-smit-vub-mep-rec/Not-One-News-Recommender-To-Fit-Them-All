@@ -285,6 +285,7 @@ def _compute_topk_item_exposure(predictions: Any, k: int) -> np.ndarray:
     return exposure
 
 
+# Includes zero-exposure items (increases Gini)
 def _gini_from_exposure(exposure: np.ndarray) -> float:
     """Compute Gini coefficient from item exposure counts."""
     if exposure.size == 0:
