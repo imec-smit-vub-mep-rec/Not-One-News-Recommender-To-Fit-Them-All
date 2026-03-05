@@ -1,0 +1,747 @@
+{
+  "generated_at": "2026-03-05T16:40:25.261847",
+  "basic_stats": {
+    "n_articles_catalog": 20738,
+    "n_articles_interacted": 2908,
+    "n_users": 18827,
+    "n_impressions": 477534,
+    "n_homepage_impressions": 335811,
+    "n_article_impressions": 141723,
+    "homepage_ratio": 0.7032,
+    "n_sessions": 235038,
+    "time_min": "2023-05-18 07:00:01",
+    "time_max": "2023-06-01 06:59:59",
+    "time_span_days": 14.0,
+    "impressions_per_user_mean": 25.36,
+    "impressions_per_user_median": 13.0,
+    "n_subscribers": 525,
+    "subscriber_ratio": 0.0279
+  },
+  "missing_data": {
+    "articles": {
+      "image_ids": {
+        "count": 1878,
+        "pct": 9.06
+      },
+      "total_inviews": {
+        "count": 10770,
+        "pct": 51.93
+      },
+      "total_pageviews": {
+        "count": 10882,
+        "pct": 52.47
+      },
+      "total_read_time": {
+        "count": 10882,
+        "pct": 52.47
+      }
+    },
+    "impressions": {
+      "article_id": {
+        "count": 335811,
+        "pct": 70.32
+      },
+      "scroll_percentage": {
+        "count": 337955,
+        "pct": 70.77
+      },
+      "gender": {
+        "count": 445004,
+        "pct": 93.19
+      },
+      "postcode": {
+        "count": 468353,
+        "pct": 98.08
+      },
+      "age": {
+        "count": 465013,
+        "pct": 97.38
+      },
+      "next_read_time": {
+        "count": 12927,
+        "pct": 2.71
+      },
+      "next_scroll_percentage": {
+        "count": 55982,
+        "pct": 11.72
+      }
+    }
+  },
+  "per_user_summary": {
+    "total_impressions": {
+      "mean": 25.3643,
+      "std": 32.5955,
+      "min": 1.0,
+      "p25": 4.0,
+      "median": 13.0,
+      "p75": 33.0,
+      "p90": 66.0,
+      "p95": 92.7,
+      "p99": 155.0,
+      "max": 315.0
+    },
+    "article_impressions": {
+      "mean": 7.5276,
+      "std": 16.2669,
+      "min": 0.0,
+      "p25": 0.0,
+      "median": 2.0,
+      "p75": 7.0,
+      "p90": 20.0,
+      "p95": 34.7,
+      "p99": 81.0,
+      "max": 250.0
+    },
+    "homepage_impressions": {
+      "mean": 17.8367,
+      "std": 25.9391,
+      "min": 0.0,
+      "p25": 2.0,
+      "median": 8.0,
+      "p75": 23.0,
+      "p90": 47.0,
+      "p95": 69.0,
+      "p99": 125.74,
+      "max": 314.0
+    },
+    "n_sessions": {
+      "mean": 12.8764,
+      "std": 14.392,
+      "min": 1.0,
+      "p25": 3.0,
+      "median": 8.0,
+      "p75": 18.0,
+      "p90": 32.0,
+      "p95": 43.0,
+      "p99": 66.0,
+      "max": 126.0
+    },
+    "total_read_time": {
+      "mean": 1129.7659,
+      "std": 1783.0833,
+      "min": 0.0,
+      "p25": 157.0,
+      "median": 490.0,
+      "p75": 1366.0,
+      "p90": 2887.0,
+      "p95": 4271.7,
+      "p99": 8575.22,
+      "max": 32850.0
+    },
+    "avg_read_time": {
+      "mean": 50.9252,
+      "std": 61.3529,
+      "min": 0.0,
+      "p25": 21.8,
+      "median": 35.5333,
+      "p75": 59.8,
+      "p90": 94.762,
+      "p95": 131.0,
+      "p99": 284.6167,
+      "max": 1609.0
+    },
+    "unique_articles": {
+      "mean": 5.6732,
+      "std": 12.8292,
+      "min": 0.0,
+      "p25": 0.0,
+      "median": 1.0,
+      "p75": 5.0,
+      "p90": 15.0,
+      "p95": 25.0,
+      "p99": 63.0,
+      "max": 212.0
+    },
+    "engagement_span_days": {
+      "mean": 7.6354,
+      "std": 5.0179,
+      "min": 0.0,
+      "p25": 2.8259,
+      "median": 8.7195,
+      "p75": 12.5431,
+      "p90": 13.4119,
+      "p95": 13.6778,
+      "p99": 13.9109,
+      "max": 13.9973
+    }
+  },
+  "temporal_patterns": {
+    "hourly_distribution": {
+      "0": 2748,
+      "1": 2969,
+      "2": 4742,
+      "3": 12746,
+      "4": 24620,
+      "5": 31156,
+      "6": 33255,
+      "7": 29345,
+      "8": 23151,
+      "9": 21581,
+      "10": 22979,
+      "11": 21125,
+      "12": 22264,
+      "13": 22811,
+      "14": 22989,
+      "15": 23533,
+      "16": 22087,
+      "17": 25034,
+      "18": 26559,
+      "19": 26382,
+      "20": 25421,
+      "21": 17383,
+      "22": 8465,
+      "23": 4189
+    },
+    "daily_distribution": {
+      "Mon": 70758,
+      "Tue": 70640,
+      "Wed": 69724,
+      "Thu": 68027,
+      "Fri": 72022,
+      "Sat": 60151,
+      "Sun": 66212
+    },
+    "pct_morning_6_12": 31.71,
+    "pct_afternoon_12_18": 29.05,
+    "pct_evening_18_24": 22.7,
+    "pct_night_0_6": 16.54,
+    "pct_weekend": 26.46
+  },
+  "category_distribution": [
+    {
+      "category": "nyheder",
+      "impressions": 50915,
+      "pct": 35.93
+    },
+    {
+      "category": "sport",
+      "impressions": 24668,
+      "pct": 17.41
+    },
+    {
+      "category": "underholdning",
+      "impressions": 22292,
+      "pct": 15.73
+    },
+    {
+      "category": "krimi",
+      "impressions": 22217,
+      "pct": 15.68
+    },
+    {
+      "category": "penge",
+      "impressions": 8309,
+      "pct": 5.86
+    },
+    {
+      "category": "nationen",
+      "impressions": 5607,
+      "pct": 3.96
+    },
+    {
+      "category": "musik",
+      "impressions": 4523,
+      "pct": 3.19
+    },
+    {
+      "category": "forbrug",
+      "impressions": 2487,
+      "pct": 1.75
+    },
+    {
+      "category": "sex_og_samliv",
+      "impressions": 277,
+      "pct": 0.2
+    },
+    {
+      "category": "ferie",
+      "impressions": 143,
+      "pct": 0.1
+    },
+    {
+      "category": "opinionen",
+      "impressions": 101,
+      "pct": 0.07
+    },
+    {
+      "category": "side9",
+      "impressions": 83,
+      "pct": 0.06
+    },
+    {
+      "category": "haandvaerkeren",
+      "impressions": 78,
+      "pct": 0.06
+    },
+    {
+      "category": "bibliotek",
+      "impressions": 13,
+      "pct": 0.01
+    },
+    {
+      "category": "biler",
+      "impressions": 9,
+      "pct": 0.01
+    },
+    {
+      "category": "podcast",
+      "impressions": 1,
+      "pct": 0.0
+    }
+  ],
+  "outliers": {
+    "iqr_method": {
+      "total_impressions": {
+        "count": 1419,
+        "pct": 7.54,
+        "lower_bound": -39.5,
+        "upper_bound": 76.5
+      },
+      "article_impressions": {
+        "count": 2224,
+        "pct": 11.81,
+        "lower_bound": -10.5,
+        "upper_bound": 17.5
+      },
+      "homepage_impressions": {
+        "count": 1505,
+        "pct": 7.99,
+        "lower_bound": -29.5,
+        "upper_bound": 54.5
+      },
+      "n_sessions": {
+        "count": 1128,
+        "pct": 5.99,
+        "lower_bound": -19.5,
+        "upper_bound": 40.5
+      },
+      "total_read_time": {
+        "count": 1614,
+        "pct": 8.57,
+        "lower_bound": -1656.5,
+        "upper_bound": 3179.5
+      },
+      "avg_read_time": {
+        "count": 1206,
+        "pct": 6.41,
+        "lower_bound": -35.2,
+        "upper_bound": 116.8
+      },
+      "unique_articles": {
+        "count": 2279,
+        "pct": 12.1,
+        "lower_bound": -7.5,
+        "upper_bound": 12.5
+      },
+      "engagement_span_days": {
+        "count": 0,
+        "pct": 0.0,
+        "lower_bound": -11.7499,
+        "upper_bound": 27.1188
+      }
+    },
+    "zscore_method": {
+      "total_impressions": {
+        "count": 432,
+        "pct": 2.29
+      },
+      "article_impressions": {
+        "count": 408,
+        "pct": 2.17
+      },
+      "homepage_impressions": {
+        "count": 455,
+        "pct": 2.42
+      },
+      "n_sessions": {
+        "count": 383,
+        "pct": 2.03
+      },
+      "total_read_time": {
+        "count": 387,
+        "pct": 2.06
+      },
+      "avg_read_time": {
+        "count": 264,
+        "pct": 1.4
+      },
+      "unique_articles": {
+        "count": 394,
+        "pct": 2.09
+      },
+      "engagement_span_days": {
+        "count": 0,
+        "pct": 0.0
+      }
+    },
+    "top_10_users_by_impressions": [
+      {
+        "user_id": "914469",
+        "total_impressions": 315.0,
+        "article_impressions": 1.0,
+        "homepage_impressions": 314.0,
+        "n_sessions": 20.0,
+        "total_read_time": 4375.0,
+        "avg_read_time": 13.89,
+        "unique_articles": 1.0,
+        "engagement_span_days": 13.02
+      },
+      {
+        "user_id": "2467812",
+        "total_impressions": 293.0,
+        "article_impressions": 18.0,
+        "homepage_impressions": 275.0,
+        "n_sessions": 25.0,
+        "total_read_time": 6525.0,
+        "avg_read_time": 22.27,
+        "unique_articles": 4.0,
+        "engagement_span_days": 12.89
+      },
+      {
+        "user_id": "904400",
+        "total_impressions": 287.0,
+        "article_impressions": 16.0,
+        "homepage_impressions": 271.0,
+        "n_sessions": 34.0,
+        "total_read_time": 10187.0,
+        "avg_read_time": 35.49,
+        "unique_articles": 1.0,
+        "engagement_span_days": 13.99
+      },
+      {
+        "user_id": "1081414",
+        "total_impressions": 283.0,
+        "article_impressions": 13.0,
+        "homepage_impressions": 270.0,
+        "n_sessions": 26.0,
+        "total_read_time": 6176.0,
+        "avg_read_time": 21.82,
+        "unique_articles": 2.0,
+        "engagement_span_days": 13.99
+      },
+      {
+        "user_id": "1381081",
+        "total_impressions": 280.0,
+        "article_impressions": 0.0,
+        "homepage_impressions": 280.0,
+        "n_sessions": 31.0,
+        "total_read_time": 4576.0,
+        "avg_read_time": 16.34,
+        "unique_articles": 0.0,
+        "engagement_span_days": 13.98
+      },
+      {
+        "user_id": "2082097",
+        "total_impressions": 278.0,
+        "article_impressions": 0.0,
+        "homepage_impressions": 278.0,
+        "n_sessions": 52.0,
+        "total_read_time": 6661.0,
+        "avg_read_time": 23.96,
+        "unique_articles": 0.0,
+        "engagement_span_days": 13.71
+      },
+      {
+        "user_id": "2582723",
+        "total_impressions": 273.0,
+        "article_impressions": 220.0,
+        "homepage_impressions": 53.0,
+        "n_sessions": 98.0,
+        "total_read_time": 22177.0,
+        "avg_read_time": 81.23,
+        "unique_articles": 176.0,
+        "engagement_span_days": 13.73
+      },
+      {
+        "user_id": "512125",
+        "total_impressions": 267.0,
+        "article_impressions": 202.0,
+        "homepage_impressions": 65.0,
+        "n_sessions": 90.0,
+        "total_read_time": 26700.0,
+        "avg_read_time": 100.0,
+        "unique_articles": 188.0,
+        "engagement_span_days": 13.9
+      },
+      {
+        "user_id": "662438",
+        "total_impressions": 257.0,
+        "article_impressions": 250.0,
+        "homepage_impressions": 7.0,
+        "n_sessions": 78.0,
+        "total_read_time": 12777.0,
+        "avg_read_time": 49.72,
+        "unique_articles": 188.0,
+        "engagement_span_days": 13.93
+      },
+      {
+        "user_id": "1649049",
+        "total_impressions": 255.0,
+        "article_impressions": 1.0,
+        "homepage_impressions": 254.0,
+        "n_sessions": 21.0,
+        "total_read_time": 4259.0,
+        "avg_read_time": 16.7,
+        "unique_articles": 1.0,
+        "engagement_span_days": 10.79
+      }
+    ]
+  },
+  "composite_outlier_analysis": {
+    "suggested_remove_top": 0,
+    "gap_index": 1,
+    "gap_ratio": 1.0434,
+    "removal_curve": [
+      {
+        "rank": 1,
+        "composite_score": 25.4817,
+        "gap_to_next": 1.0075
+      },
+      {
+        "rank": 2,
+        "composite_score": 25.2928,
+        "gap_to_next": 1.0434
+      },
+      {
+        "rank": 3,
+        "composite_score": 24.2409,
+        "gap_to_next": 1.0044
+      },
+      {
+        "rank": 4,
+        "composite_score": 24.1342,
+        "gap_to_next": 1.0134
+      },
+      {
+        "rank": 5,
+        "composite_score": 23.8149,
+        "gap_to_next": 1.0253
+      },
+      {
+        "rank": 6,
+        "composite_score": 23.2283,
+        "gap_to_next": 1.005
+      },
+      {
+        "rank": 7,
+        "composite_score": 23.1116,
+        "gap_to_next": 1.0294
+      },
+      {
+        "rank": 8,
+        "composite_score": 22.4508,
+        "gap_to_next": 1.006
+      },
+      {
+        "rank": 9,
+        "composite_score": 22.316,
+        "gap_to_next": 1.0254
+      },
+      {
+        "rank": 10,
+        "composite_score": 21.764,
+        "gap_to_next": 1.0209
+      },
+      {
+        "rank": 11,
+        "composite_score": 21.3181,
+        "gap_to_next": 1.0233
+      },
+      {
+        "rank": 12,
+        "composite_score": 20.8337,
+        "gap_to_next": 1.0108
+      },
+      {
+        "rank": 13,
+        "composite_score": 20.6109,
+        "gap_to_next": 1.0208
+      },
+      {
+        "rank": 14,
+        "composite_score": 20.1908,
+        "gap_to_next": 1.0103
+      },
+      {
+        "rank": 15,
+        "composite_score": 19.9849,
+        "gap_to_next": 1.0366
+      },
+      {
+        "rank": 16,
+        "composite_score": 19.2783,
+        "gap_to_next": 1.0032
+      },
+      {
+        "rank": 17,
+        "composite_score": 19.2171,
+        "gap_to_next": 1.0009
+      },
+      {
+        "rank": 18,
+        "composite_score": 19.1997,
+        "gap_to_next": 1.0038
+      },
+      {
+        "rank": 19,
+        "composite_score": 19.1263,
+        "gap_to_next": 1.0352
+      },
+      {
+        "rank": 20,
+        "composite_score": 18.4767,
+        "gap_to_next": 1.0066
+      },
+      {
+        "rank": 21,
+        "composite_score": 18.3558,
+        "gap_to_next": 1.0024
+      },
+      {
+        "rank": 22,
+        "composite_score": 18.3125,
+        "gap_to_next": 1.0037
+      },
+      {
+        "rank": 23,
+        "composite_score": 18.2441,
+        "gap_to_next": 1.0085
+      },
+      {
+        "rank": 24,
+        "composite_score": 18.0908,
+        "gap_to_next": 1.0174
+      },
+      {
+        "rank": 25,
+        "composite_score": 17.7817,
+        "gap_to_next": 1.0221
+      },
+      {
+        "rank": 26,
+        "composite_score": 17.3964,
+        "gap_to_next": 1.0179
+      },
+      {
+        "rank": 27,
+        "composite_score": 17.0902,
+        "gap_to_next": 1.0034
+      },
+      {
+        "rank": 28,
+        "composite_score": 17.0327,
+        "gap_to_next": 1.0052
+      },
+      {
+        "rank": 29,
+        "composite_score": 16.9438,
+        "gap_to_next": 1.0432
+      },
+      {
+        "rank": 30,
+        "composite_score": 16.2427,
+        "gap_to_next": 1.0046
+      },
+      {
+        "rank": 31,
+        "composite_score": 16.1679,
+        "gap_to_next": 1.0028
+      },
+      {
+        "rank": 32,
+        "composite_score": 16.1229,
+        "gap_to_next": 1.0137
+      },
+      {
+        "rank": 33,
+        "composite_score": 15.9045,
+        "gap_to_next": 1.011
+      },
+      {
+        "rank": 34,
+        "composite_score": 15.7307,
+        "gap_to_next": 1.0032
+      },
+      {
+        "rank": 35,
+        "composite_score": 15.6801,
+        "gap_to_next": 1.0003
+      },
+      {
+        "rank": 36,
+        "composite_score": 15.675,
+        "gap_to_next": 1.0058
+      },
+      {
+        "rank": 37,
+        "composite_score": 15.5851,
+        "gap_to_next": 1.0027
+      },
+      {
+        "rank": 38,
+        "composite_score": 15.5436,
+        "gap_to_next": 1.0002
+      },
+      {
+        "rank": 39,
+        "composite_score": 15.5407,
+        "gap_to_next": 1.0161
+      },
+      {
+        "rank": 40,
+        "composite_score": 15.2948,
+        "gap_to_next": 1.0025
+      },
+      {
+        "rank": 41,
+        "composite_score": 15.2571,
+        "gap_to_next": 1.0151
+      },
+      {
+        "rank": 42,
+        "composite_score": 15.0305,
+        "gap_to_next": 1.004
+      },
+      {
+        "rank": 43,
+        "composite_score": 14.9713,
+        "gap_to_next": 1.0042
+      },
+      {
+        "rank": 44,
+        "composite_score": 14.9086,
+        "gap_to_next": 1.0076
+      },
+      {
+        "rank": 45,
+        "composite_score": 14.796,
+        "gap_to_next": 1.0005
+      },
+      {
+        "rank": 46,
+        "composite_score": 14.789,
+        "gap_to_next": 1.0036
+      },
+      {
+        "rank": 47,
+        "composite_score": 14.7367,
+        "gap_to_next": 1.0058
+      },
+      {
+        "rank": 48,
+        "composite_score": 14.6521,
+        "gap_to_next": 1.0026
+      },
+      {
+        "rank": 49,
+        "composite_score": 14.6144,
+        "gap_to_next": 1.0175
+      },
+      {
+        "rank": 50,
+        "composite_score": 14.3632,
+        "gap_to_next": null
+      }
+    ]
+  }
+}

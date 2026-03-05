@@ -11,10 +11,22 @@ Usage:
     python run_full_pipeline.py --config config.json
     python run_full_pipeline.py --dataset adressa --input-dir /path/to/data
 """
-
-import argparse
 import sys
 from pathlib import Path
+# Add src to path
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+# Import modules
+from src.clustering.clustering import get_cluster_statistics
+from src.clustering import UserFeatureExtractor, KMeansClusterer, ClusterVisualizer
+from src.preprocessing import DataCleaner, DataValidator, behaviors_to_interactions, articles_to_content
+from src.converters import ADConverter, AdressaConverter, EBNeRDConverter, GenericConverter
+from src.utils.datetime import parse_timestamp_series
+from src.utils import Session, setup_logging, get_logger, load_dataframe, save_dataframe, log_memory
+from src.config import PipelineConfig, load_config, save_config, PRESET_CONFIGS
+
+# Import standard libraries
+import argparse
 from datetime import datetime
 from dataclasses import asdict
 import ast
@@ -23,19 +35,543 @@ import gc
 import numpy as np
 import pandas as pd
 
-# Add src to path
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
-from src.config import PipelineConfig, load_config, save_config, PRESET_CONFIGS
-from src.utils import Session, setup_logging, get_logger, load_dataframe, save_dataframe, log_memory
-from src.utils.datetime import parse_timestamp_series
-from src.converters import ADConverter, AdressaConverter, EBNeRDConverter, GenericConverter
-from src.preprocessing import DataCleaner, DataValidator, behaviors_to_interactions, articles_to_content
-from src.clustering import UserFeatureExtractor, KMeansClusterer, ClusterVisualizer
-from src.clustering.clustering import get_cluster_statistics
-
-
 logger = get_logger("pipeline")
+
+# Step 1: Data Conversion
+
+
+def run_conversion(config: PipelineConfig, session: Session) -> tuple:
+    """Run data conversion step.
+
+    Returns:
+        Tuple of (articles_df, impressions_df)
+    """
+    logger.info("=" * 60)
+    logger.info("STEP 1: Data Conversion")
+    logger.info("=" * 60)
+
+    dataset_format = config.dataset.format
+    input_path = config.dataset.input_path
+
+    # Select converter
+    # ad, hln, vk share the same S3 Spark CSV structure (article_metadata.csv + impressions/)
+    # todo: anonymize these comments and namings once the pipeline is stable to remove references to the concrete dataset names
+    if config.dataset.name in ("ad", "hln", "vk") or dataset_format == "spark_csv":
+        converter = ADConverter(config=config.dataset)
+    elif dataset_format == "jsonl" or config.dataset.name == "adressa":
+        converter = AdressaConverter(config=config.dataset)
+    elif dataset_format == "parquet" or config.dataset.name == "ebnerd":
+        converter = EBNeRDConverter(config=config.dataset)
+    else:
+        converter = GenericConverter(
+            config=config.dataset,
+        )
+
+    if dataset_format == "jsonl" or config.dataset.name == "adressa":
+        # Adressa articles are extracted during impression processing.
+        logger.info(
+            "Converting impressions (required before articles for Adressa)...")
+        impressions_df = converter.convert_impressions()
+
+        logger.info("Converting articles...")
+        articles_df = converter.convert_articles()
+    else:
+        # Convert articles
+        logger.info("Converting articles...")
+        articles_df = converter.convert_articles()
+
+        # Convert impressions
+        logger.info("Converting impressions...")
+        impressions_df = converter.convert_impressions()
+
+    # NOTE: How did you come to these subscriber deduction parameters? 1 paywall article is not that much ...
+    #       Why different for VK than AD / HLN (Does that impact the number of subscribers detected?)?
+    # Keep logged-in and subscriber concepts disentangled:
+    # - is_logged_in comes from impression auth state
+    # - is_subscriber is derived from metered paywall behavior when available
+    # ANSWER: AD/HLN allow 1 paywall article for logged-in users, VK allows 0. Since we don't have direct access to the paywall data, we can only use the impression data to deduce subscriber status.
+    if config.dataset.name in ("ad", "hln", "vk"):
+        min_paywall_reads = 1 if config.dataset.name == "vk" else 2
+        impressions_df = _derive_subscriber_from_paywall_metered(
+            impressions_df,
+            articles_df,
+            min_paywall_reads=min_paywall_reads,
+            min_read_time_seconds=30.0,
+        )
+
+    articles_path = session.get_path("articles.parquet")
+    save_dataframe(articles_df, articles_path)
+    logger.info(f"Saved {len(articles_df)} articles to {articles_path}")
+
+    impressions_path = session.get_path("impressions.parquet")
+    save_dataframe(impressions_df, impressions_path)
+    logger.info(
+        f"Saved {len(impressions_df)} impressions to {impressions_path}")
+
+    _save_session_embeddings_if_available(articles_df, config, session)
+
+    return articles_df, impressions_df
+
+
+# Step 2: Preprocessing
+def run_preprocessing(
+    articles_df,
+    impressions_df,
+    config: PipelineConfig,
+    session: Session,
+) -> tuple:
+    """Run preprocessing step for CLUSTERING.
+
+    IMPORTANT: This preprocessing matches the legacy behavior from the short paper:
+    0. Cleaning: remove empty articles, remove duplicates, remove invalid sessions (max 50 article impressions per session; bot filter), remove outlier users.
+    1. Clustering happens on all users (homepage + article readers), except for users with more than 50 article impressions per session and possibly heavy outliers.
+    2. NO removal of homepage views - homepage behavior is a clustering signal
+    3. interactions.csv (for RecPack) is created separately and only includes
+       rows with valid article_id. RecPack's MinItemsPerUser filter is applied there.
+
+    Returns:
+        Tuple of (cleaned_articles, cleaned_impressions, interactions)
+    """
+    logger.info("=" * 60)
+    logger.info("STEP 2: Preprocessing (for clustering)")
+    logger.info("=" * 60)
+
+    # Validate data
+    validator = DataValidator()
+    is_valid = validator.validate_all(
+        articles=articles_df,
+        impressions=impressions_df,
+    )
+    validator.print_summary()
+
+    if not is_valid:
+        logger.warning("Validation found issues, proceeding with cleaning")
+
+    # Clean data for CLUSTERING - matching legacy behavior:
+    # - NO user filtering (filter_users=False)
+    # - NO removal of homepage views (remove_empty_articles=False)
+    # Homepage behavior is a meaningful clustering signal!
+    cleaner = DataCleaner(
+        min_impressions_per_user=config.clustering.min_impressions_per_user,
+        remove_empty_articles=False,  # CRITICAL: Keep homepage views for clustering
+        clean_categories=True,
+        filter_users=False,  # CRITICAL: Do NOT filter users before clustering
+    )
+
+    cleaned_articles = cleaner.clean_articles(articles_df)
+    cleaned_impressions = cleaner.clean_impressions(
+        impressions_df, cleaned_articles)
+
+    logger.info(f"Cleaning stats: {cleaner.get_stats()}")
+    logger.info(
+        f"NOTE: All {cleaner.get_stats().get('final_users', 'N/A')} users retained for clustering (including homepage-only users)")
+
+    # Save cleaned data (includes homepage views)
+    save_dataframe(cleaned_articles, session.get_path(
+        "articles_cleaned.parquet"))
+    save_dataframe(cleaned_impressions, session.get_path(
+        "impressions_cleaned.parquet"))
+
+    # Create interactions for RecPack - this ONLY includes article interactions
+    # (behaviors_to_interactions filters out rows without valid article_id)
+    # User filtering (min_items_per_user) happens later in RecPack
+    interactions_df = behaviors_to_interactions(cleaned_impressions)
+
+    interactions_path = session.get_path("interactions.csv")
+    save_dataframe(interactions_df, interactions_path, format="csv")
+    logger.info(
+        f"Saved {len(interactions_df)} article interactions to {interactions_path}")
+    logger.info(
+        f"NOTE: interactions.csv excludes homepage views (for RecPack evaluation)")
+
+    # Create article content for content-based unless embeddings-only mode is selected.
+    content_mode = config.evaluation.content_mode
+    if content_mode == "embeddings":
+        logger.info(
+            "Skipping content generation (EMBEDDINGS mode uses pre-calculated vectors)")
+    else:
+        full_content = content_mode == "full"
+        content_df = articles_to_content(
+            cleaned_articles, full_content=full_content)
+        content_path = session.get_path("articles_content.csv")
+        save_dataframe(content_df, content_path, format="csv")
+        logger.info(f"Saved article content to {content_path}")
+
+    return cleaned_articles, cleaned_impressions, interactions_df
+
+
+# Step 3: Clustering
+def run_clustering(
+    impressions_df,
+    articles_df,
+    config: PipelineConfig,
+    session: Session,
+) -> tuple:
+    """Run clustering step on ALL users.
+
+    IMPORTANT: This runs on ALL users including homepage-only users.
+    The impressions_df should include homepage views (article_id is null)
+    as this is an important clustering signal from the legacy code.
+
+    Returns:
+        Tuple of (features_df, labels, cluster_info)
+    """
+    logger.info("=" * 60)
+    logger.info("STEP 3: User Clustering (ALL users including homepage-only)")
+    logger.info("=" * 60)
+
+    # Check if legacy features mode is enabled
+    legacy_mode = config.clustering.legacy_features
+    if legacy_mode:
+        logger.info(
+            "Using LEGACY feature set (no per-category proportions, no time-of-day, with session behavior features)")
+
+    # Extract features (including homepage behavior - matching legacy clustering)
+    # NOTE: what do all the legacy things mean? And are the other things new compared to legacy? Is there overlap?
+    # ANSWER: The legacy features are the features that were used in the original clustering paper. The new features are features that would be interesting or better. But to stay close to the original, we use the legacy features for the current analysis.
+    extractor = UserFeatureExtractor(
+        include_categories=True,
+        include_time=True,
+        include_activity=True,
+        include_diversity=True,
+        # Homepage behavior is a clustering signal (legacy behavior)
+        include_homepage=True,
+        legacy_mode=legacy_mode,  # Use legacy feature set if configured
+        scale=True,  # Scale the features to prevent different scales from affecting the clustering result
+    )
+
+    features_df = extractor.fit_transform(impressions_df, articles_df)
+    logger.info(
+        f"Extracted {len(extractor.get_feature_names())} features for {len(features_df)} users")
+
+    # Optional: filter out top N outliers (by L2 norm in scaled space).
+    X = extractor.get_feature_matrix(features_df)
+    remove_top = config.clustering.remove_top
+    removed_outliers_summary = []
+    if remove_top > 0:
+        # Keep at least 3 users for clustering
+        n_outliers = min(remove_top, len(features_df) - 3)
+        if n_outliers > 0:
+            outlier_scores = np.linalg.norm(X, axis=1)
+            outlier_idx = np.argsort(outlier_scores)[-n_outliers:]
+            outlier_user_ids = features_df.iloc[outlier_idx]["user_id"].tolist(
+            )
+
+            # Build an outlier summary from pre-filter impressions.
+            outlier_impressions = impressions_df[impressions_df["user_id"].isin(
+                outlier_user_ids)]
+            impression_counts = outlier_impressions.groupby("user_id").size()
+            if "session_id" in outlier_impressions.columns:
+                session_counts = outlier_impressions.groupby(
+                    "user_id")["session_id"].nunique(dropna=True)
+            else:
+                session_counts = pd.Series(0, index=impression_counts.index)
+
+            removed_outliers_summary = [
+                {
+                    "user_id": str(user_id),
+                    "impressions": int(impression_counts.get(user_id, 0)),
+                    "sessions": int(session_counts.get(user_id, 0)),
+                }
+                for user_id in outlier_user_ids
+            ]
+
+            mask = ~features_df["user_id"].isin(outlier_user_ids)
+            features_df = features_df[mask].reset_index(drop=True)
+            X = extractor.get_feature_matrix(features_df)
+            logger.info(
+                f"Filtered out top {n_outliers} outlier(s): {outlier_user_ids}")
+        else:
+            logger.info(
+                f"Skipping outlier removal (--remove-top={remove_top}) because too few users are available"
+            )
+
+    # Save features
+    save_dataframe(features_df, session.get_path("user_features.parquet"))
+
+    # Cluster
+    clusterer = KMeansClusterer(
+        n_clusters=config.clustering.n_clusters,
+        k_range=range(1, config.clustering.max_clusters + 1),
+        k_selection_method=config.clustering.k_selection_method,
+        random_state=config.clustering.random_state,
+        n_init=config.clustering.n_init,
+        use_minibatch=config.clustering.use_minibatch,
+        minibatch_threshold=config.clustering.minibatch_threshold,
+        batch_size=config.clustering.batch_size,
+        n_jobs=config.clustering.n_jobs,
+        silhouette_sample_size=config.clustering.silhouette_sample_size,
+    )
+
+    labels = clusterer.fit_predict(X)
+
+    # Add cluster labels to features
+    features_df['cluster_id'] = labels
+
+    # Save clustered users
+    users_df = features_df[['user_id', 'cluster_id']].copy()
+    save_dataframe(users_df, session.get_path("user_clusters.parquet"))
+    save_dataframe(users_df, session.get_path(
+        "user_clusters.csv"), format="csv")
+
+    # Evaluate clustering
+    eval_metrics = clusterer.evaluate(
+        X, silhouette_sample_size=config.clustering.silhouette_sample_size
+    )
+    logger.info(f"Clustering evaluation: {eval_metrics}")
+
+    # Per-cluster silhouette scores — use subsample to avoid O(n²) on full dataset
+    per_cluster_silhouette = {}
+    try:
+        from sklearn.metrics import silhouette_samples
+
+        _max_sil_samples = config.clustering.silhouette_sample_size
+        _n = len(labels)
+        if _max_sil_samples and _n > _max_sil_samples:
+            _rng = np.random.RandomState(config.clustering.random_state)
+            _idx = _rng.choice(_n, _max_sil_samples, replace=False)
+            _X_sub, _labels_sub = X[_idx], labels[_idx]
+            logger.info(
+                f"Computing per-cluster silhouette on subsample of {_max_sil_samples} (full: {_n})")
+        else:
+            _X_sub, _labels_sub = X, labels
+
+        _sample_sil = silhouette_samples(_X_sub, _labels_sub)
+        for _cid in np.unique(_labels_sub):
+            per_cluster_silhouette[int(_cid)] = float(
+                _sample_sil[_labels_sub == _cid].mean())
+        logger.info(f"Per-cluster silhouette: {per_cluster_silhouette}")
+    except Exception as _e:
+        logger.warning(f"Could not compute per-cluster silhouette: {_e}")
+
+    # Visualize
+    viz_dir = session.get_path("visualizations")
+    Path(viz_dir).mkdir(exist_ok=True)
+
+    visualizer = ClusterVisualizer(output_dir=viz_dir)
+
+    if clusterer.metrics_:
+        visualizer.plot_elbow(clusterer.metrics_)
+
+    visualizer.plot_distribution(labels)
+
+    cluster_centers = clusterer.get_cluster_centers(
+        extractor.get_feature_names())
+    visualizer.plot_profiles(cluster_centers)
+
+    logger.info(f"Saved visualizations to {viz_dir}")
+
+    # Save cluster profiles Excel to clusters/ directory
+    subscriber_label = "Number of Subscribers"
+
+    save_cluster_profiles_excel(
+        features_df=features_df,
+        labels=labels,
+        cluster_centers=cluster_centers,
+        feature_names=extractor.get_feature_names(),
+        eval_metrics=eval_metrics,
+        session=session,
+        scaler=extractor.get_metadata().get('scaler'),
+        impressions_df=impressions_df,
+        articles_df=articles_df,
+        subscriber_label=subscriber_label,
+        per_cluster_silhouette=per_cluster_silhouette or None,
+    )
+
+    return features_df, labels, {
+        'n_clusters': clusterer.n_clusters,
+        'metrics': eval_metrics,
+        'feature_names': extractor.get_feature_names(),
+        'removed_outliers': removed_outliers_summary,
+    }
+
+
+# Step 4: RecPack Evaluation
+def run_evaluation(
+    interactions_df,
+    users_df,
+    content_df,
+    config: PipelineConfig,
+    session: Session,
+) -> dict:
+    """Run evaluation step.
+
+    NOTE: User filtering (min_impressions_per_user) happens HERE via RecPack's
+    MinItemsPerUser filter, NOT during preprocessing. This ensures clustering
+    happens on ALL users after cleaning, while evaluation only includes users with enough
+    interactions for meaningful recommendations.
+
+    IMPORTANT: Pre-calculated embeddings are REQUIRED for CB-ST algorithm.
+    Generate them first with: python scripts/generate_embeddings.py --input-dir <path>
+
+    Returns:
+        Dictionary of results per cluster
+    """
+    logger.info("=" * 60)
+    logger.info("STEP 4: RecPack Evaluation (user filtering applied here)")
+    logger.info("=" * 60)
+
+    try:
+        from src.evaluation import (
+            run_cluster_evaluation,
+            run_cluster_evaluation_legacy_style,
+            ResultsAnalyzer,
+        )
+    except ImportError as e:
+        logger.error(f"Could not import evaluation module: {e}")
+        logger.error(
+            "RecPack may not be installed. Install with: pip install recpack")
+        return {}
+
+    log_memory("evaluation start")
+    content_mode = config.evaluation.content_mode
+
+    # Check for pre-calculated embeddings file (REQUIRED for CB-ST)
+    embeddings_df = None
+    embedding_column = 'embedding'  # Column name from generate_embeddings.py
+
+    session_embeddings_path = session.get_path(
+        "title_category_embeddings.parquet")
+    input_path = Path(config.dataset.input_path)
+    embeddings_path = input_path / "title_category_embeddings.parquet"
+
+    # Check if CB-ST is in the enabled algorithms
+    algorithm_names = [
+        algo.name for algo in config.evaluation.algorithms if algo.enabled]
+    cb_st_enabled = any(name in ('CB-ST', 'SentenceTransformerContentBased')
+                        for name in algorithm_names)
+
+    if Path(session_embeddings_path).exists():
+        logger.info(f"Found session embeddings at {session_embeddings_path}")
+        import pandas as pd
+        embeddings_df = pd.read_parquet(session_embeddings_path)
+        logger.info(f"Loaded embeddings for {len(embeddings_df)} articles")
+        logger.info(f"Using embedding column: '{embedding_column}'")
+    elif embeddings_path.exists():
+        logger.info(f"Found pre-calculated embeddings at {embeddings_path}")
+        import pandas as pd
+        embeddings_df = pd.read_parquet(embeddings_path)
+        logger.info(f"Loaded embeddings for {len(embeddings_df)} articles")
+        logger.info(f"Using embedding column: '{embedding_column}'")
+    elif cb_st_enabled or content_mode == "embeddings":
+        # CB-ST requires pre-calculated embeddings - throw error
+        logger.error("=" * 60)
+        logger.error("ERROR: Pre-calculated embeddings are REQUIRED for CB-ST")
+        logger.error("=" * 60)
+        logger.error(f"Expected file: {embeddings_path}")
+        logger.error("")
+        logger.error("Generate embeddings first with:")
+        logger.error(
+            f"  python scripts/generate_embeddings.py --input-dir {input_path}")
+        logger.error("")
+        logger.error(
+            "Or disable CB-ST by removing it from the algorithms list.")
+        logger.error("=" * 60)
+        raise FileNotFoundError(
+            f"Pre-calculated embeddings required for content_mode='{content_mode}' but not found at "
+            f"{embeddings_path}. Generate with: python scripts/generate_embeddings.py --input-dir {input_path}"
+        )
+    else:
+        logger.info(f"No pre-calculated embeddings found at {embeddings_path}")
+        logger.info("CB-ST is not enabled, continuing without embeddings")
+
+    # Load articles for topic-level diversity metrics (CoverageK_topics, GiniK_topics)
+    articles_df = None
+    articles_cleaned_path = session.get_path("articles_cleaned.parquet")
+    if Path(articles_cleaned_path).exists():
+        articles_df = load_dataframe(articles_cleaned_path)
+        logger.info(
+            f"Loaded {len(articles_df)} articles for topic diversity metrics")
+    else:
+        logger.info(
+            "No articles_cleaned.parquet found; topic-level diversity metrics will be skipped")
+
+    # Run evaluation per cluster
+    results_dir = session.get_path("evaluation_results")
+
+    # Extract algorithm names and params from AlgorithmConfig objects
+    algorithm_names = [
+        algo.name for algo in config.evaluation.algorithms if algo.enabled]
+    algorithm_params = {
+        algo.name: dict(algo.params)
+        for algo in config.evaluation.algorithms
+        if algo.enabled and getattr(algo, "params", None)
+    }
+    algorithm_grids = {
+        algo.name: dict(algo.grid)
+        for algo in config.evaluation.algorithms
+        if algo.enabled and getattr(algo, "grid", None) and algo.grid
+    }
+
+    # NOTE: Hard to follow the full config trail, is this set to True for the DPG experiments?
+    # ANSWER: Yes, otherwise it trains a separate model per cluster, which is not what we want for the DPG experiments (how does one model perform on the different clusters?)
+    train_on_full = config.evaluation.train_on_full_dataset
+
+    if train_on_full:
+        # Legacy-style: train once on full dataset, aggregate metrics per cluster
+        logger.info(
+            "Using LEGACY-STYLE evaluation (train on full dataset, aggregate per cluster)")
+        results = run_cluster_evaluation_legacy_style(
+            interactions_df=interactions_df,
+            users_df=users_df,
+            content_df=content_df,
+            articles_df=articles_df,
+            algorithms=algorithm_names,
+            algorithm_params=algorithm_params,
+            algorithm_grids=algorithm_grids,
+            k_values=config.evaluation.k_values,
+            min_items_per_user=config.clustering.min_impressions_per_user,
+            output_dir=results_dir,
+            embeddings_df=embeddings_df,
+            embedding_column=embedding_column,
+            n_most_recent_in=config.evaluation.n_most_recent_in,
+            optimization_metric=config.evaluation.optimization_metric,
+            optimization_k=config.evaluation.optimization_k,
+        )
+    else:
+        # Per-cluster training: train a separate model per cluster
+        logger.info(
+            "Using PER-CLUSTER training (train separate model per cluster)")
+        results = run_cluster_evaluation(
+            interactions_df=interactions_df,
+            users_df=users_df,
+            content_df=content_df,
+            articles_df=articles_df,
+            algorithms=algorithm_names,
+            algorithm_params=algorithm_params,
+            k_values=config.evaluation.k_values,
+            min_items_per_user=config.clustering.min_impressions_per_user,
+            output_dir=results_dir,
+            n_jobs=1,
+            embeddings_df=embeddings_df,
+            embedding_column=embedding_column,
+        )
+
+    log_memory("evaluation after cluster run")
+
+    # Analyze results
+    analyzer = ResultsAnalyzer(results)
+
+    # Generate and save report
+    report = analyzer.generate_report()
+
+    report_path = session.get_path("evaluation_report.txt")
+    with open(report_path, 'w') as f:
+        f.write(report)
+
+    logger.info(f"Saved evaluation report to {report_path}")
+    print("\n" + report)
+
+    # Append recommendation performance to cluster profiles Excel
+    try:
+        append_recommendation_performance(session, results)
+    except Exception as _e:
+        logger.warning(
+            f"Could not append recommendation performance sheet: {_e}")
+
+    log_memory("evaluation end")
+    return results
+
 
 def parse_args():
     """Parse command line arguments."""
@@ -43,62 +579,62 @@ def parse_args():
         description="Run the full RICON analysis pipeline",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    
+
     parser.add_argument(
         "--config",
         type=str,
         help="Path to configuration JSON file",
     )
-    
+
     parser.add_argument(
         "--dataset",
         type=str,
         choices=["ad", "adressa", "ebnerd", "hln", "vk", "custom"],
         help="Dataset type (uses preset config)",
     )
-    
+
     parser.add_argument(
         "--input-dir",
         type=str,
         help="Input directory with raw data",
     )
-    
+
     parser.add_argument(
         "--output-dir",
         type=str,
         help="Output directory for results (default: runs/)",
     )
-    
+
     parser.add_argument(
         "--run-id",
         type=str,
         help="Run ID / session directory name (e.g. hln_20260216_130931). Use when --skip-clustering to load clusters from an existing run.",
     )
-    
+
     parser.add_argument(
         "--n-clusters",
         type=int,
         help="Number of clusters (default: auto-detect)",
     )
-    
+
     parser.add_argument(
         "--legacy-features",
         action="store_true",
         help="Use legacy feature set for clustering (no per-category proportions, no time-of-day)",
     )
-    
+
     parser.add_argument(
         "--skip-conversion",
         action="store_true",
         help="Skip data conversion (use existing converted data)",
     )
-    
+
     parser.add_argument(
         "--skip-clustering",
         action="store_true",
         help="Skip clustering (use existing cluster assignments)",
     )
-    
+
     parser.add_argument(
         "--skip-evaluation",
         action="store_true",
@@ -111,13 +647,13 @@ def parse_args():
         default=None,
         help="Remove top N outlier users by L2 norm in scaled feature space before clustering (overrides clustering.remove_top)",
     )
-    
+
     parser.add_argument(
         "--train-per-cluster",
         action="store_true",
         help="Train a separate model per cluster (default: train on full dataset, aggregate per cluster)",
     )
-    
+
     parser.add_argument(
         "--content-mode",
         type=str,
@@ -130,14 +666,14 @@ def parse_args():
         action="store_true",
         help="DEPRECATED: equivalent to --content-mode full",
     )
-    
+
     parser.add_argument(
         "--verbose",
         "-v",
         action="store_true",
         help="Verbose output",
     )
-    
+
     args = parser.parse_args()
     if args.remove_top is not None and args.remove_top < 0:
         parser.error("--remove-top must be >= 0")
@@ -146,7 +682,7 @@ def parse_args():
 
 def load_or_create_config(args) -> PipelineConfig:
     """Load config from file or create from arguments.
-    
+
     Supports three modes:
     1. --config alone: Load full config from JSON file
     2. --dataset alone: Use preset config for known datasets
@@ -154,16 +690,16 @@ def load_or_create_config(args) -> PipelineConfig:
     """
     from dataclasses import replace
     import json
-    
+
     config = None
     config_overrides = {}
-    
+
     # Load config file overrides if provided
     if args.config:
         with open(args.config, 'r') as f:
             config_overrides = json.load(f)
         logger.info(f"Loaded config overrides from {args.config}")
-    
+
     # Create base config from dataset preset or full config file
     if args.dataset:
         if args.dataset in PRESET_CONFIGS:
@@ -184,9 +720,10 @@ def load_or_create_config(args) -> PipelineConfig:
         # Create default config
         from src.config import DatasetConfig, SessionConfig
         config = PipelineConfig(
-            dataset=DatasetConfig(name="custom", input_path=args.input_dir or ""),
+            dataset=DatasetConfig(
+                name="custom", input_path=args.input_dir or ""),
         )
-    
+
     # Apply config file overrides (for --dataset + --config case)
     if config_overrides:
         if 'dataset' in config_overrides:
@@ -195,7 +732,8 @@ def load_or_create_config(args) -> PipelineConfig:
                 target_key = "input_path" if key == "input_dir" else key
                 if hasattr(config.dataset, target_key):
                     setattr(config.dataset, target_key, value)
-                    logger.info(f"Config override: dataset.{target_key} = {value}")
+                    logger.info(
+                        f"Config override: dataset.{target_key} = {value}")
             # Keep session run_id in sync when dataset name is overridden
             if 'name' in config_overrides['dataset']:
                 config.session.dataset_name = config.dataset.name
@@ -215,21 +753,21 @@ def load_or_create_config(args) -> PipelineConfig:
                 if hasattr(config.session, key):
                     setattr(config.session, key, value)
                     logger.info(f"Config override: session.{key} = {value}")
-    
+
     # Override with command line args (highest priority)
     if args.input_dir:
         config.dataset.input_path = args.input_dir
-    
+
     if args.output_dir:
         config.session.base_output_dir = args.output_dir
-    
+
     if args.run_id:
         config.session.run_id = args.run_id
         logger.info(f"CLI override: session.run_id = {args.run_id}")
-    
+
     if args.n_clusters:
         config.clustering.n_clusters = args.n_clusters
-    
+
     # --legacy-features flag takes highest priority
     if args.legacy_features:
         config.clustering.legacy_features = True
@@ -245,15 +783,17 @@ def load_or_create_config(args) -> PipelineConfig:
         logger.info("CLI override: evaluation.content_mode = full")
     if args.content_mode:
         config.evaluation.content_mode = args.content_mode
-        logger.info(f"CLI override: evaluation.content_mode = {args.content_mode}")
+        logger.info(
+            f"CLI override: evaluation.content_mode = {args.content_mode}")
 
     if args.train_per_cluster:
         config.evaluation.train_on_full_dataset = False
-        logger.info("CLI override: evaluation.train_on_full_dataset = False (train per cluster)")
+        logger.info(
+            "CLI override: evaluation.train_on_full_dataset = False (train per cluster)")
 
     if config.clustering.remove_top < 0:
         raise ValueError("clustering.remove_top must be >= 0")
-    
+
     return config
 
 
@@ -284,156 +824,6 @@ def log_resolved_config(config: PipelineConfig) -> None:
     for key, leaf_value in _iter_flat_config_leaves(config_dict):
         logger.info(f"{key}: {leaf_value}")
     logger.info("=" * 60)
-
-
-def run_conversion(config: PipelineConfig, session: Session) -> tuple:
-    """Run data conversion step.
-    
-    Returns:
-        Tuple of (articles_df, impressions_df)
-    """
-    logger.info("=" * 60)
-    logger.info("STEP 1: Data Conversion")
-    logger.info("=" * 60)
-    
-    dataset_format = config.dataset.format
-    input_path = config.dataset.input_path
-    
-    # Select converter
-    # ad, hln, vk share the same S3 Spark CSV structure (article_metadata.csv + impressions/)
-    # todo: anonymize these comments and namings once the pipeline is stable to remove references to the concrete dataset names
-    if config.dataset.name in ("ad", "hln", "vk") or dataset_format == "spark_csv":
-        converter = ADConverter(config=config.dataset)
-    elif dataset_format == "jsonl" or config.dataset.name == "adressa":
-        converter = AdressaConverter(config=config.dataset)
-    elif dataset_format == "parquet" or config.dataset.name == "ebnerd":
-        converter = EBNeRDConverter(config=config.dataset)
-    else:
-        converter = GenericConverter(
-            config=config.dataset,
-        )
-    
-    if dataset_format == "jsonl" or config.dataset.name == "adressa":
-        # Adressa articles are extracted during impression processing.
-        logger.info("Converting impressions (required before articles for Adressa)...")
-        impressions_df = converter.convert_impressions()
-        
-        logger.info("Converting articles...")
-        articles_df = converter.convert_articles()
-    else:
-        # Convert articles
-        logger.info("Converting articles...")
-        articles_df = converter.convert_articles()
-        
-        # Convert impressions
-        logger.info("Converting impressions...")
-        impressions_df = converter.convert_impressions()
-
-    # NOTE: How did you come to these subscriber deduction parameters? 1 paywall article is not that much ...
-    #       Why different for VK than AD / HLN (Does that impact the number of subscribers detected?)?
-    # Keep logged-in and subscriber concepts disentangled:
-    # - is_logged_in comes from impression auth state
-    # - is_subscriber is derived from metered paywall behavior when available
-    # ANSWER: AD/HLN allow 1 paywall article for logged-in users, VK allows 0. Since we don't have direct access to the paywall data, we can only use the impression data to deduce subscriber status.
-    if config.dataset.name in ("ad", "hln", "vk"):
-        min_paywall_reads = 1 if config.dataset.name == "vk" else 2
-        impressions_df = _derive_subscriber_from_paywall_metered(
-            impressions_df,
-            articles_df,
-            min_paywall_reads=min_paywall_reads,
-            min_read_time_seconds=30.0,
-        )
-    
-    articles_path = session.get_path("articles.parquet")
-    save_dataframe(articles_df, articles_path)
-    logger.info(f"Saved {len(articles_df)} articles to {articles_path}")
-    
-    impressions_path = session.get_path("impressions.parquet")
-    save_dataframe(impressions_df, impressions_path)
-    logger.info(f"Saved {len(impressions_df)} impressions to {impressions_path}")
-
-    _save_session_embeddings_if_available(articles_df, config, session)
-    
-    return articles_df, impressions_df
-
-
-def run_preprocessing(
-    articles_df,
-    impressions_df,
-    config: PipelineConfig,
-    session: Session,
-) -> tuple:
-    """Run preprocessing step for CLUSTERING.
-    
-    IMPORTANT: This preprocessing matches the legacy behavior from the short paper:
-    0. Cleaning: remove empty articles, remove duplicates, remove invalid sessions (max 50 article impressions per session; bot filter), remove outlier users.
-    1. Clustering happens on all users (homepage + article readers), except for users with more than 50 article impressions per session and possibly heavy outliers.
-    2. NO removal of homepage views - homepage behavior is a clustering signal
-    3. interactions.csv (for RecPack) is created separately and only includes
-       rows with valid article_id. RecPack's MinItemsPerUser filter is applied there.
-    
-    Returns:
-        Tuple of (cleaned_articles, cleaned_impressions, interactions)
-    """
-    logger.info("=" * 60)
-    logger.info("STEP 2: Preprocessing (for clustering)")
-    logger.info("=" * 60)
-    
-    # Validate data
-    validator = DataValidator()
-    is_valid = validator.validate_all(
-        articles=articles_df,
-        impressions=impressions_df,
-    )
-    validator.print_summary()
-    
-    if not is_valid:
-        logger.warning("Validation found issues, proceeding with cleaning")
-    
-    # Clean data for CLUSTERING - matching legacy behavior:
-    # - NO user filtering (filter_users=False)
-    # - NO removal of homepage views (remove_empty_articles=False)
-    # Homepage behavior is a meaningful clustering signal!
-    cleaner = DataCleaner(
-        min_impressions_per_user=config.clustering.min_impressions_per_user,
-        remove_empty_articles=False,  # CRITICAL: Keep homepage views for clustering
-        clean_categories=True,
-        filter_users=False,  # CRITICAL: Do NOT filter users before clustering
-    )
-    
-    cleaned_articles = cleaner.clean_articles(articles_df)
-    cleaned_impressions = cleaner.clean_impressions(impressions_df, cleaned_articles)
-    
-    logger.info(f"Cleaning stats: {cleaner.get_stats()}")
-    logger.info(f"NOTE: All {cleaner.get_stats().get('final_users', 'N/A')} users retained for clustering (including homepage-only users)")
-    
-    # Save cleaned data (includes homepage views)
-    save_dataframe(cleaned_articles, session.get_path("articles_cleaned.parquet"))
-    save_dataframe(cleaned_impressions, session.get_path("impressions_cleaned.parquet"))
-    
-    # Create interactions for RecPack - this ONLY includes article interactions
-    # (behaviors_to_interactions filters out rows without valid article_id)
-    # User filtering (min_items_per_user) happens later in RecPack
-    interactions_df = behaviors_to_interactions(cleaned_impressions)
-    
-    interactions_path = session.get_path("interactions.csv")
-    save_dataframe(interactions_df, interactions_path, format="csv")
-    logger.info(f"Saved {len(interactions_df)} article interactions to {interactions_path}")
-    logger.info(f"NOTE: interactions.csv excludes homepage views (for RecPack evaluation)")
-    
-    # Create article content for content-based unless embeddings-only mode is selected.
-    content_mode = config.evaluation.content_mode
-    if content_mode == "embeddings":
-        logger.info("Skipping content generation (EMBEDDINGS mode uses pre-calculated vectors)")
-    else:
-        full_content = content_mode == "full"
-        content_df = articles_to_content(cleaned_articles, full_content=full_content)
-        content_path = session.get_path("articles_content.csv")
-        save_dataframe(content_df, content_path, format="csv")
-        logger.info(f"Saved article content to {content_path}")
-    
-    return cleaned_articles, cleaned_impressions, interactions_df
-
 
 
 def _parse_embedding(raw_value):
@@ -480,13 +870,15 @@ def _save_session_embeddings_if_available(articles_df, config: PipelineConfig, s
     if config.dataset.name not in ("ad", "hln", "vk"):
         return
     if "bert_embedding" not in articles_df.columns:
-        logger.info("AD dataset detected but no 'bert_embedding' column found in articles")
+        logger.info(
+            "AD dataset detected but no 'bert_embedding' column found in articles")
         return
 
     parsed = articles_df["bert_embedding"].map(_parse_embedding)
     valid_mask = parsed.notna()
     if not valid_mask.any():
-        logger.warning("No valid embeddings parsed from 'bert_embedding' column")
+        logger.warning(
+            "No valid embeddings parsed from 'bert_embedding' column")
         return
 
     embeddings_df = articles_df.loc[valid_mask, ["article_id"]].copy()
@@ -534,7 +926,8 @@ def _derive_subscriber_from_paywall_metered(
         return impressions_df
 
     df = impressions_df.copy()
-    lookup = articles_df[['article_id', 'is_paywall']].drop_duplicates(subset='article_id').copy()
+    lookup = articles_df[['article_id', 'is_paywall']
+                         ].drop_duplicates(subset='article_id').copy()
     lookup['is_paywall'] = lookup['is_paywall'].fillna(False).astype(bool)
 
     if 'is_logged_in' not in df.columns:
@@ -567,12 +960,14 @@ def _derive_subscriber_from_paywall_metered(
     # NOTE: this probably has no impact on DPG datasets, but why add deduced subscribers, when the field is explicitly available?
     # ANSWER: can you point me to thefield in the data that indicates whether a user is a subscriber?
     if 'is_subscriber' in df.columns:
-        existing = df.groupby('user_id')['is_subscriber'].any().reindex(user_ids, fill_value=False).astype(bool)
+        existing = df.groupby('user_id')['is_subscriber'].any().reindex(
+            user_ids, fill_value=False).astype(bool)
         user_subscriber = (existing | derived) & user_logged_in
     else:
         user_subscriber = derived & user_logged_in
 
-    df['is_subscriber'] = df['user_id'].map(user_subscriber).fillna(False).astype(bool)
+    df['is_subscriber'] = df['user_id'].map(
+        user_subscriber).fillna(False).astype(bool)
     logger.info(
         "Derived subscriber status from metered paywall: "
         f"{int(user_subscriber.sum())}/{len(user_subscriber)} users"
@@ -615,13 +1010,15 @@ def _compute_cluster_summary(
     if not valid_mask.any():
         return pd.DataFrame()
 
-    needed_cols = [c for c in ['user_id', 'article_id', 'read_time', 'session_id', 'category_str', 'impression_time'] if c in impressions_df.columns]
+    needed_cols = [c for c in ['user_id', 'article_id', 'read_time', 'session_id',
+                               'category_str', 'impression_time'] if c in impressions_df.columns]
     df = impressions_df.loc[valid_mask, needed_cols].copy()
     df['cluster_id'] = cluster_by_impression.loc[valid_mask].values
 
     # Merge category info from articles if not already present in impressions
     if 'category_str' not in df.columns and articles_df is not None and 'category_str' in articles_df.columns:
-        cat_lookup = articles_df[['article_id', 'category_str']].drop_duplicates(subset='article_id')
+        cat_lookup = articles_df[['article_id', 'category_str']].drop_duplicates(
+            subset='article_id')
         df = df.merge(cat_lookup, on='article_id', how='left')
 
     total_users = users_unique['user_id'].nunique()
@@ -652,7 +1049,8 @@ def _compute_cluster_summary(
             .any()
             .astype(int)
         )
-        logged_in_per_user = logged_in_per_user.reindex(user_cluster.index, fill_value=0)
+        logged_in_per_user = logged_in_per_user.reindex(
+            user_cluster.index, fill_value=0)
         logged_in_counts = logged_in_per_user.groupby(user_cluster).sum()
     else:
         logged_in_per_user = pd.Series(0, index=user_cluster.index, dtype=int)
@@ -663,12 +1061,18 @@ def _compute_cluster_summary(
     zero_user = pd.Series(0.0, index=user_cluster.index)
 
     if 'read_time' in df.columns:
-        avg_reading_time = df.groupby('user_id')['read_time'].mean().reindex(user_cluster.index, fill_value=0)
-        article_reading_time = df.loc[~is_homepage].groupby('user_id')['read_time'].sum().reindex(user_cluster.index, fill_value=0)
-        total_reading_time = df.groupby('user_id')['read_time'].sum().reindex(user_cluster.index, fill_value=0)
-        proportion_article_time = (article_reading_time / total_reading_time).replace([np.inf, -np.inf], 0).fillna(0)
-        avg_rt_homepage = df.loc[is_homepage].groupby('user_id')['read_time'].mean().reindex(user_cluster.index, fill_value=0)
-        avg_rt_articles = df.loc[~is_homepage].groupby('user_id')['read_time'].mean().reindex(user_cluster.index, fill_value=0)
+        avg_reading_time = df.groupby('user_id')['read_time'].mean().reindex(
+            user_cluster.index, fill_value=0)
+        article_reading_time = df.loc[~is_homepage].groupby(
+            'user_id')['read_time'].sum().reindex(user_cluster.index, fill_value=0)
+        total_reading_time = df.groupby('user_id')['read_time'].sum().reindex(
+            user_cluster.index, fill_value=0)
+        proportion_article_time = (
+            article_reading_time / total_reading_time).replace([np.inf, -np.inf], 0).fillna(0)
+        avg_rt_homepage = df.loc[is_homepage].groupby(
+            'user_id')['read_time'].mean().reindex(user_cluster.index, fill_value=0)
+        avg_rt_articles = df.loc[~is_homepage].groupby(
+            'user_id')['read_time'].mean().reindex(user_cluster.index, fill_value=0)
     else:
         avg_reading_time = zero_user
         proportion_article_time = zero_user
@@ -686,7 +1090,8 @@ def _compute_cluster_summary(
             .astype(float)
         )
         impressions_per_session = df.groupby(['user_id', 'session_id']).size()
-        avg_impressions_per_session = impressions_per_session.groupby('user_id').mean().reindex(user_cluster.index, fill_value=0)
+        avg_impressions_per_session = impressions_per_session.groupby(
+            'user_id').mean().reindex(user_cluster.index, fill_value=0)
 
         has_subscriber = 'is_subscriber' in impressions_df.columns
         if has_subscriber:
@@ -704,8 +1109,10 @@ def _compute_cluster_summary(
                 .reindex(cluster_sizes.index)
             )
         else:
-            avg_sessions_subscriber = pd.Series(np.nan, index=cluster_sizes.index)
-            avg_sessions_non_subscriber = pd.Series(np.nan, index=cluster_sizes.index)
+            avg_sessions_subscriber = pd.Series(
+                np.nan, index=cluster_sizes.index)
+            avg_sessions_non_subscriber = pd.Series(
+                np.nan, index=cluster_sizes.index)
 
         if has_logged_in:
             logged_in_mask = logged_in_per_user.astype(bool)
@@ -722,15 +1129,19 @@ def _compute_cluster_summary(
                 .reindex(cluster_sizes.index)
             )
         else:
-            avg_sessions_logged_in = pd.Series(np.nan, index=cluster_sizes.index)
-            avg_sessions_non_logged_in = pd.Series(np.nan, index=cluster_sizes.index)
+            avg_sessions_logged_in = pd.Series(
+                np.nan, index=cluster_sizes.index)
+            avg_sessions_non_logged_in = pd.Series(
+                np.nan, index=cluster_sizes.index)
     else:
         session_counts = zero_user
         avg_impressions_per_session = zero_user
         avg_sessions_subscriber = pd.Series(np.nan, index=cluster_sizes.index)
-        avg_sessions_non_subscriber = pd.Series(np.nan, index=cluster_sizes.index)
+        avg_sessions_non_subscriber = pd.Series(
+            np.nan, index=cluster_sizes.index)
         avg_sessions_logged_in = pd.Series(np.nan, index=cluster_sizes.index)
-        avg_sessions_non_logged_in = pd.Series(np.nan, index=cluster_sizes.index)
+        avg_sessions_non_logged_in = pd.Series(
+            np.nan, index=cluster_sizes.index)
 
     if has_category:
         valid_cat = df['category_str'].notna() & (df['category_str'] != '')
@@ -758,15 +1169,22 @@ def _compute_cluster_summary(
             'weekend': (dt.dt.dayofweek >= 5).values,
         })
         time_means = time_flags.groupby('user_id').mean()
-        pct_morning = time_means['morning'].reindex(user_cluster.index, fill_value=0)
-        pct_afternoon = time_means['afternoon'].reindex(user_cluster.index, fill_value=0)
-        pct_evening = time_means['evening'].reindex(user_cluster.index, fill_value=0)
-        pct_night = time_means['night'].reindex(user_cluster.index, fill_value=0)
-        pct_weekend = time_means['weekend'].reindex(user_cluster.index, fill_value=0)
+        pct_morning = time_means['morning'].reindex(
+            user_cluster.index, fill_value=0)
+        pct_afternoon = time_means['afternoon'].reindex(
+            user_cluster.index, fill_value=0)
+        pct_evening = time_means['evening'].reindex(
+            user_cluster.index, fill_value=0)
+        pct_night = time_means['night'].reindex(
+            user_cluster.index, fill_value=0)
+        pct_weekend = time_means['weekend'].reindex(
+            user_cluster.index, fill_value=0)
 
         _time_agg = dt.groupby(df['user_id']).agg(['min', 'max'])
-        _span = (_time_agg['max'] - _time_agg['min']).dt.total_seconds() / (24 * 3600)
-        engagement_span_days = _span.reindex(user_cluster.index, fill_value=0).fillna(0)
+        _span = (_time_agg['max'] - _time_agg['min']
+                 ).dt.total_seconds() / (24 * 3600)
+        engagement_span_days = _span.reindex(
+            user_cluster.index, fill_value=0).fillna(0)
     else:
         pct_morning = pct_afternoon = pct_evening = pct_night = pct_weekend = zero_user
         engagement_span_days = zero_user
@@ -778,21 +1196,29 @@ def _compute_cluster_summary(
             df.groupby(['user_id', 'session_id'])['read_time']
             .sum()
         )
-        avg_session_duration = session_read_time.groupby('user_id').mean().reindex(user_cluster.index, fill_value=0)
+        avg_session_duration = session_read_time.groupby(
+            'user_id').mean().reindex(user_cluster.index, fill_value=0)
     else:
         avg_session_duration = zero_user
 
     if has_session and has_category:
-        valid_cat_df = df.loc[df['category_str'].notna() & (df['category_str'] != ''), ['user_id', 'session_id', 'category_str']].copy()
+        valid_cat_df = df.loc[df['category_str'].notna() & (df['category_str'] != ''), [
+            'user_id', 'session_id', 'category_str']].copy()
         if not valid_cat_df.empty:
             if 'impression_time' in df.columns:
-                valid_cat_df['_ts'] = time_seconds.reindex(valid_cat_df.index).values
-                valid_cat_df = valid_cat_df.sort_values(['user_id', 'session_id', '_ts'])
+                valid_cat_df['_ts'] = time_seconds.reindex(
+                    valid_cat_df.index).values
+                valid_cat_df = valid_cat_df.sort_values(
+                    ['user_id', 'session_id', '_ts'])
             session_keys = ['user_id', 'session_id']
-            shifted = valid_cat_df.groupby(session_keys)['category_str'].shift(1)
-            switches = ((valid_cat_df['category_str'] != shifted) & shifted.notna()).astype(int)
-            switches_per_session = switches.groupby([valid_cat_df['user_id'], valid_cat_df['session_id']]).sum()
-            avg_cat_switches = switches_per_session.groupby(level=0).mean().reindex(user_cluster.index, fill_value=0)
+            shifted = valid_cat_df.groupby(session_keys)[
+                'category_str'].shift(1)
+            switches = ((valid_cat_df['category_str']
+                        != shifted) & shifted.notna()).astype(int)
+            switches_per_session = switches.groupby(
+                [valid_cat_df['user_id'], valid_cat_df['session_id']]).sum()
+            avg_cat_switches = switches_per_session.groupby(
+                level=0).mean().reindex(user_cluster.index, fill_value=0)
         else:
             avg_cat_switches = zero_user
     else:
@@ -802,25 +1228,33 @@ def _compute_cluster_summary(
     if 'device_type' in df.columns:
         _dev = df[['user_id', 'device_type']].copy()
         _dev['device_type'] = _dev['device_type'].fillna('unknown').str.lower()
-        _dev_dummies = pd.get_dummies(_dev, columns=['device_type'], prefix='', prefix_sep='')
+        _dev_dummies = pd.get_dummies(
+            _dev, columns=['device_type'], prefix='', prefix_sep='')
         _dev_cols = [c for c in _dev_dummies.columns if c != 'user_id']
         _dev_means = _dev_dummies.groupby('user_id')[_dev_cols].mean()
-        device_desktop = _dev_means.get('desktop', pd.Series(0.0, index=_dev_means.index)).reindex(user_cluster.index, fill_value=0)
-        device_mobile = _dev_means.get('mobile', pd.Series(0.0, index=_dev_means.index)).reindex(user_cluster.index, fill_value=0)
-        device_tablet = _dev_means.get('tablet', pd.Series(0.0, index=_dev_means.index)).reindex(user_cluster.index, fill_value=0)
+        device_desktop = _dev_means.get('desktop', pd.Series(
+            0.0, index=_dev_means.index)).reindex(user_cluster.index, fill_value=0)
+        device_mobile = _dev_means.get('mobile', pd.Series(
+            0.0, index=_dev_means.index)).reindex(user_cluster.index, fill_value=0)
+        device_tablet = _dev_means.get('tablet', pd.Series(
+            0.0, index=_dev_means.index)).reindex(user_cluster.index, fill_value=0)
     else:
         device_desktop = device_mobile = device_tablet = None
 
     # --- Scroll depth (if column present) -------------------------------------------
     if 'scroll_depth' in df.columns:
-        avg_scroll_depth = df.groupby('user_id')['scroll_depth'].mean().reindex(user_cluster.index, fill_value=0)
+        avg_scroll_depth = df.groupby('user_id')['scroll_depth'].mean().reindex(
+            user_cluster.index, fill_value=0)
     else:
         avg_scroll_depth = None
 
     # --- Homepage / article impression counts per user ------------------------------
-    hp_count_per_user = df[is_homepage].groupby('user_id').size().reindex(user_cluster.index, fill_value=0).astype(float)
-    art_count_per_user = df[~is_homepage].groupby('user_id').size().reindex(user_cluster.index, fill_value=0).astype(float)
-    _total_per_user = (hp_count_per_user + art_count_per_user).replace(0, np.nan)
+    hp_count_per_user = df[is_homepage].groupby('user_id').size().reindex(
+        user_cluster.index, fill_value=0).astype(float)
+    art_count_per_user = df[~is_homepage].groupby('user_id').size().reindex(
+        user_cluster.index, fill_value=0).astype(float)
+    _total_per_user = (hp_count_per_user +
+                       art_count_per_user).replace(0, np.nan)
     homepage_ratio_user = (hp_count_per_user / _total_per_user).fillna(0)
 
     # --- Diversity metrics (entropy & gini from raw category data) ------------------
@@ -828,13 +1262,15 @@ def _compute_cluster_summary(
         _valid_cat = df['category_str'].notna() & (df['category_str'] != '')
         _vdf = df.loc[_valid_cat, ['user_id', 'category_str']]
         if not _vdf.empty:
-            _ucc = _vdf.groupby(['user_id', 'category_str']).size().unstack(fill_value=0)
+            _ucc = _vdf.groupby(['user_id', 'category_str']
+                                ).size().unstack(fill_value=0)
             _ucp = _ucc.div(_ucc.sum(axis=1), axis=0)
             _logp = np.where(_ucp.values > 0, np.log(_ucp.values + 1e-10), 0)
             category_entropy = pd.Series(
                 -(_ucp.values * _logp).sum(axis=1), index=_ucc.index,
             ).reindex(user_cluster.index, fill_value=0)
-            _arr = _ucc.reindex(user_cluster.index, fill_value=0).to_numpy(dtype=np.float64)
+            _arr = _ucc.reindex(user_cluster.index,
+                                fill_value=0).to_numpy(dtype=np.float64)
             _nc = _arr.shape[1]
             _sorted = np.sort(_arr, axis=1)
             _rs = _sorted.sum(axis=1)
@@ -884,8 +1320,10 @@ def _compute_cluster_summary(
 
     cluster_means = user_metrics.groupby('cluster_id').mean().round(4)
 
-    sub_proportion = (sub_counts / cluster_sizes.replace(0, np.nan)).fillna(0).round(4)
-    logged_in_proportion = (logged_in_counts / cluster_sizes.replace(0, np.nan)).fillna(0).round(4)
+    sub_proportion = (sub_counts / cluster_sizes.replace(0,
+                      np.nan)).fillna(0).round(4)
+    logged_in_proportion = (
+        logged_in_counts / cluster_sizes.replace(0, np.nan)).fillna(0).round(4)
 
     cols = {
         'Number of Users': cluster_sizes,
@@ -908,8 +1346,10 @@ def _compute_cluster_summary(
         'Avg Sessions per Non-subscriber': avg_sessions_non_subscriber.round(4),
     })
     if has_logged_in:
-        cols['Avg Sessions per Logged-in User'] = avg_sessions_logged_in.round(4)
-        cols['Avg Sessions per Non-logged-in User'] = avg_sessions_non_logged_in.round(4)
+        cols['Avg Sessions per Logged-in User'] = avg_sessions_logged_in.round(
+            4)
+        cols['Avg Sessions per Non-logged-in User'] = avg_sessions_non_logged_in.round(
+            4)
 
     cols.update({
         'Avg Categories Read': cluster_means['avg_categories_read'],
@@ -931,11 +1371,13 @@ def _compute_cluster_summary(
     summary = pd.DataFrame(cols)
 
     if 'device_desktop' in cluster_means.columns:
-        summary['Desktop (%)'] = (cluster_means['device_desktop'] * 100).round(2)
+        summary['Desktop (%)'] = (
+            cluster_means['device_desktop'] * 100).round(2)
         summary['Mobile (%)'] = (cluster_means['device_mobile'] * 100).round(2)
         summary['Tablet (%)'] = (cluster_means['device_tablet'] * 100).round(2)
     if 'avg_scroll_depth' in cluster_means.columns:
-        summary['Avg Scroll Depth'] = cluster_means['avg_scroll_depth'].round(4)
+        summary['Avg Scroll Depth'] = cluster_means['avg_scroll_depth'].round(
+            4)
 
     return summary, user_metrics
 
@@ -953,16 +1395,19 @@ def _compute_category_profiles(
     """
     import pandas as pd
 
-    user_cluster = users_df.drop_duplicates().set_index('user_id')['cluster_id']
+    user_cluster = users_df.drop_duplicates().set_index('user_id')[
+        'cluster_id']
 
     needed = ['user_id', 'article_id']
     if 'category_str' in impressions_df.columns:
         needed.append('category_str')
-    df = impressions_df[impressions_df['user_id'].isin(user_cluster.index)][needed].copy()
+    df = impressions_df[impressions_df['user_id'].isin(
+        user_cluster.index)][needed].copy()
     df['cluster_id'] = df['user_id'].map(user_cluster)
 
     if 'category_str' not in df.columns and articles_df is not None and 'category_str' in articles_df.columns:
-        cat_lookup = articles_df[['article_id', 'category_str']].drop_duplicates(subset='article_id')
+        cat_lookup = articles_df[['article_id', 'category_str']].drop_duplicates(
+            subset='article_id')
         df = df.merge(cat_lookup, on='article_id', how='left')
 
     if 'category_str' not in df.columns:
@@ -972,7 +1417,8 @@ def _compute_category_profiles(
     if valid.empty:
         return None
 
-    counts = valid.groupby(['cluster_id', 'category_str']).size().reset_index(name='impressions')
+    counts = valid.groupby(['cluster_id', 'category_str']
+                           ).size().reset_index(name='impressions')
     totals = counts.groupby('cluster_id')['impressions'].transform('sum')
     counts['proportion_pct'] = (counts['impressions'] / totals * 100).round(2)
     counts['rank'] = (
@@ -1094,8 +1540,10 @@ def save_cluster_profiles_excel(
         center_vals = cluster_centers[feature_names].values
         raw_center_vals = scaler.inverse_transform(center_vals)
         cluster_summary = pd.DataFrame(raw_center_vals, columns=feature_names)
-        cluster_summary.insert(0, "cluster_id", cluster_centers["cluster_id"].values)
-        cluster_summary.insert(1, "size", cluster_summary["cluster_id"].map(size_map))
+        cluster_summary.insert(
+            0, "cluster_id", cluster_centers["cluster_id"].values)
+        cluster_summary.insert(
+            1, "size", cluster_summary["cluster_id"].map(size_map))
     else:
         cluster_summary = None
 
@@ -1106,7 +1554,8 @@ def save_cluster_profiles_excel(
     centers.insert(2, "size_pct", pct_scaled.round(2))
 
     # --- Sheet 3: Cluster Statistics (mean + std per feature) -----------------------
-    stats = get_cluster_statistics(features_df, labels, feature_cols=feature_names)
+    stats = get_cluster_statistics(
+        features_df, labels, feature_cols=feature_names)
 
     # --- Sheet 4: Summary -----------------------------------------------------------
     summary_rows = [
@@ -1120,7 +1569,8 @@ def save_cluster_profiles_excel(
     if per_cluster_silhouette:
         for cid in sorted(per_cluster_silhouette):
             summary_rows.append(
-                (f"silhouette_cluster_{cid}", round(per_cluster_silhouette[cid], 4))
+                (f"silhouette_cluster_{cid}", round(
+                    per_cluster_silhouette[cid], 4))
             )
 
     summary_df = pd.DataFrame(summary_rows, columns=["Metric", "Value"])
@@ -1142,13 +1592,16 @@ def save_cluster_profiles_excel(
     with pd.ExcelWriter(excel_path, engine="openpyxl") as writer:
         if cluster_summary is not None:
             cluster_summary.to_excel(writer, sheet_name="Cluster Summary")
-        centers.to_excel(writer, sheet_name="Cluster Centers (Scaled)", index=False)
+        centers.to_excel(
+            writer, sheet_name="Cluster Centers (Scaled)", index=False)
         stats.to_excel(writer, sheet_name="Cluster Statistics", index=False)
         summary_df.to_excel(writer, sheet_name="Summary", index=False)
         if category_profiles is not None and not category_profiles.empty:
-            category_profiles.to_excel(writer, sheet_name="Category Profiles", index=False)
+            category_profiles.to_excel(
+                writer, sheet_name="Category Profiles", index=False)
         if distributions is not None and not distributions.empty:
-            distributions.to_excel(writer, sheet_name="Cluster Distributions", index=False)
+            distributions.to_excel(
+                writer, sheet_name="Cluster Distributions", index=False)
 
     logger.info(f"Saved cluster profiles Excel to {excel_path}")
     return excel_path
@@ -1174,7 +1627,8 @@ def append_recommendation_performance(
 
     excel_path = session.get_path("cluster_profiles.xlsx", subdir="clusters")
     if not Path(excel_path).exists():
-        logger.warning("cluster_profiles.xlsx not found; skipping recommendation performance sheet")
+        logger.warning(
+            "cluster_profiles.xlsx not found; skipping recommendation performance sheet")
         return
 
     frames = []
@@ -1188,7 +1642,8 @@ def append_recommendation_performance(
     if not frames:
         return
 
-    perf_df = pd.concat(frames, ignore_index=True).sort_values(['cluster_id', 'algorithm'])
+    perf_df = pd.concat(frames, ignore_index=True).sort_values(
+        ['cluster_id', 'algorithm'])
 
     wb = load_workbook(excel_path)
     if 'Recommendation Performance' in wb.sheetnames:
@@ -1196,408 +1651,63 @@ def append_recommendation_performance(
     wb.save(excel_path)
 
     with pd.ExcelWriter(excel_path, engine='openpyxl', mode='a') as writer:
-        perf_df.to_excel(writer, sheet_name='Recommendation Performance', index=False)
+        perf_df.to_excel(
+            writer, sheet_name='Recommendation Performance', index=False)
 
-    logger.info("Appended Recommendation Performance sheet to cluster_profiles.xlsx")
-
-
-def run_clustering(
-    impressions_df,
-    articles_df,
-    config: PipelineConfig,
-    session: Session,
-) -> tuple:
-    """Run clustering step on ALL users.
-    
-    IMPORTANT: This runs on ALL users including homepage-only users.
-    The impressions_df should include homepage views (article_id is null)
-    as this is an important clustering signal from the legacy code.
-    
-    Returns:
-        Tuple of (features_df, labels, cluster_info)
-    """
-    logger.info("=" * 60)
-    logger.info("STEP 3: User Clustering (ALL users including homepage-only)")
-    logger.info("=" * 60)
-    
-    # Check if legacy features mode is enabled
-    legacy_mode = config.clustering.legacy_features
-    if legacy_mode:
-        logger.info("Using LEGACY feature set (no per-category proportions, no time-of-day, with session behavior features)")
-    
-    # Extract features (including homepage behavior - matching legacy clustering)
-    # NOTE: what do all the legacy things mean? And are the other things new compared to legacy? Is there overlap?
-    # ANSWER: The legacy features are the features that were used in the original clustering paper. The new features are features that would be interesting or better. But to stay close to the original, we use the legacy features for the current analysis.
-    extractor = UserFeatureExtractor(
-        include_categories=True,
-        include_time=True,
-        include_activity=True,
-        include_diversity=True,
-        include_homepage=True,  # Homepage behavior is a clustering signal (legacy behavior)
-        legacy_mode=legacy_mode,  # Use legacy feature set if configured
-        scale=True, # Scale the features to prevent different scales from affecting the clustering result
-    )
-    
-    features_df = extractor.fit_transform(impressions_df, articles_df)
-    logger.info(f"Extracted {len(extractor.get_feature_names())} features for {len(features_df)} users")
-    
-    # Optional: filter out top N outliers (by L2 norm in scaled space).
-    X = extractor.get_feature_matrix(features_df)
-    remove_top = config.clustering.remove_top
-    removed_outliers_summary = []
-    if remove_top > 0:
-        n_outliers = min(remove_top, len(features_df) - 3)  # Keep at least 3 users for clustering
-        if n_outliers > 0:
-            outlier_scores = np.linalg.norm(X, axis=1)
-            outlier_idx = np.argsort(outlier_scores)[-n_outliers:]
-            outlier_user_ids = features_df.iloc[outlier_idx]["user_id"].tolist()
-
-            # Build an outlier summary from pre-filter impressions.
-            outlier_impressions = impressions_df[impressions_df["user_id"].isin(outlier_user_ids)]
-            impression_counts = outlier_impressions.groupby("user_id").size()
-            if "session_id" in outlier_impressions.columns:
-                session_counts = outlier_impressions.groupby("user_id")["session_id"].nunique(dropna=True)
-            else:
-                session_counts = pd.Series(0, index=impression_counts.index)
-
-            removed_outliers_summary = [
-                {
-                    "user_id": str(user_id),
-                    "impressions": int(impression_counts.get(user_id, 0)),
-                    "sessions": int(session_counts.get(user_id, 0)),
-                }
-                for user_id in outlier_user_ids
-            ]
-
-            mask = ~features_df["user_id"].isin(outlier_user_ids)
-            features_df = features_df[mask].reset_index(drop=True)
-            X = extractor.get_feature_matrix(features_df)
-            logger.info(f"Filtered out top {n_outliers} outlier(s): {outlier_user_ids}")
-        else:
-            logger.info(
-                f"Skipping outlier removal (--remove-top={remove_top}) because too few users are available"
-            )
-    
-    # Save features
-    save_dataframe(features_df, session.get_path("user_features.parquet"))
-    
-    # Cluster
-    clusterer = KMeansClusterer(
-        n_clusters=config.clustering.n_clusters,
-        k_range=range(1, config.clustering.max_clusters + 1),
-        k_selection_method=config.clustering.k_selection_method,
-        random_state=config.clustering.random_state,
-        n_init=config.clustering.n_init,
-        use_minibatch=config.clustering.use_minibatch,
-        minibatch_threshold=config.clustering.minibatch_threshold,
-        batch_size=config.clustering.batch_size,
-        n_jobs=config.clustering.n_jobs,
-        silhouette_sample_size=config.clustering.silhouette_sample_size,
-    )
-    
-    labels = clusterer.fit_predict(X)
-    
-    # Add cluster labels to features
-    features_df['cluster_id'] = labels
-    
-    # Save clustered users
-    users_df = features_df[['user_id', 'cluster_id']].copy()
-    save_dataframe(users_df, session.get_path("user_clusters.parquet"))
-    save_dataframe(users_df, session.get_path("user_clusters.csv"), format="csv")
-    
-    # Evaluate clustering
-    eval_metrics = clusterer.evaluate(
-        X, silhouette_sample_size=config.clustering.silhouette_sample_size
-    )
-    logger.info(f"Clustering evaluation: {eval_metrics}")
-
-    # Per-cluster silhouette scores — use subsample to avoid O(n²) on full dataset
-    per_cluster_silhouette = {}
-    try:
-        from sklearn.metrics import silhouette_samples
-
-        _max_sil_samples = config.clustering.silhouette_sample_size
-        _n = len(labels)
-        if _max_sil_samples and _n > _max_sil_samples:
-            _rng = np.random.RandomState(config.clustering.random_state)
-            _idx = _rng.choice(_n, _max_sil_samples, replace=False)
-            _X_sub, _labels_sub = X[_idx], labels[_idx]
-            logger.info(f"Computing per-cluster silhouette on subsample of {_max_sil_samples} (full: {_n})")
-        else:
-            _X_sub, _labels_sub = X, labels
-
-        _sample_sil = silhouette_samples(_X_sub, _labels_sub)
-        for _cid in np.unique(_labels_sub):
-            per_cluster_silhouette[int(_cid)] = float(_sample_sil[_labels_sub == _cid].mean())
-        logger.info(f"Per-cluster silhouette: {per_cluster_silhouette}")
-    except Exception as _e:
-        logger.warning(f"Could not compute per-cluster silhouette: {_e}")
-    
-    # Visualize
-    viz_dir = session.get_path("visualizations")
-    Path(viz_dir).mkdir(exist_ok=True)
-    
-    visualizer = ClusterVisualizer(output_dir=viz_dir)
-    
-    if clusterer.metrics_:
-        visualizer.plot_elbow(clusterer.metrics_)
-    
-    visualizer.plot_distribution(labels)
-    
-    cluster_centers = clusterer.get_cluster_centers(extractor.get_feature_names())
-    visualizer.plot_profiles(cluster_centers)
-    
-    logger.info(f"Saved visualizations to {viz_dir}")
-    
-    # Save cluster profiles Excel to clusters/ directory
-    subscriber_label = "Number of Subscribers"
-
-    save_cluster_profiles_excel(
-        features_df=features_df,
-        labels=labels,
-        cluster_centers=cluster_centers,
-        feature_names=extractor.get_feature_names(),
-        eval_metrics=eval_metrics,
-        session=session,
-        scaler=extractor.get_metadata().get('scaler'),
-        impressions_df=impressions_df,
-        articles_df=articles_df,
-        subscriber_label=subscriber_label,
-        per_cluster_silhouette=per_cluster_silhouette or None,
-    )
-    
-    return features_df, labels, {
-        'n_clusters': clusterer.n_clusters,
-        'metrics': eval_metrics,
-        'feature_names': extractor.get_feature_names(),
-        'removed_outliers': removed_outliers_summary,
-    }
-
-
-def run_evaluation(
-    interactions_df,
-    users_df,
-    content_df,
-    config: PipelineConfig,
-    session: Session,
-) -> dict:
-    """Run evaluation step.
-    
-    NOTE: User filtering (min_impressions_per_user) happens HERE via RecPack's
-    MinItemsPerUser filter, NOT during preprocessing. This ensures clustering
-    happens on ALL users after cleaning, while evaluation only includes users with enough
-    interactions for meaningful recommendations.
-    
-    IMPORTANT: Pre-calculated embeddings are REQUIRED for CB-ST algorithm.
-    Generate them first with: python scripts/generate_embeddings.py --input-dir <path>
-    
-    Returns:
-        Dictionary of results per cluster
-    """
-    logger.info("=" * 60)
-    logger.info("STEP 4: RecPack Evaluation (user filtering applied here)")
-    logger.info("=" * 60)
-    
-    try:
-        from src.evaluation import (
-            run_cluster_evaluation,
-            run_cluster_evaluation_legacy_style,
-            ResultsAnalyzer,
-        )
-    except ImportError as e:
-        logger.error(f"Could not import evaluation module: {e}")
-        logger.error("RecPack may not be installed. Install with: pip install recpack")
-        return {}
-    
-    log_memory("evaluation start")
-    content_mode = config.evaluation.content_mode
-
-    # Check for pre-calculated embeddings file (REQUIRED for CB-ST)
-    embeddings_df = None
-    embedding_column = 'embedding'  # Column name from generate_embeddings.py
-    
-    session_embeddings_path = session.get_path("title_category_embeddings.parquet")
-    input_path = Path(config.dataset.input_path)
-    embeddings_path = input_path / "title_category_embeddings.parquet"
-    
-    # Check if CB-ST is in the enabled algorithms
-    algorithm_names = [algo.name for algo in config.evaluation.algorithms if algo.enabled]
-    cb_st_enabled = any(name in ('CB-ST', 'SentenceTransformerContentBased') for name in algorithm_names)
-    
-    if Path(session_embeddings_path).exists():
-        logger.info(f"Found session embeddings at {session_embeddings_path}")
-        import pandas as pd
-        embeddings_df = pd.read_parquet(session_embeddings_path)
-        logger.info(f"Loaded embeddings for {len(embeddings_df)} articles")
-        logger.info(f"Using embedding column: '{embedding_column}'")
-    elif embeddings_path.exists():
-        logger.info(f"Found pre-calculated embeddings at {embeddings_path}")
-        import pandas as pd
-        embeddings_df = pd.read_parquet(embeddings_path)
-        logger.info(f"Loaded embeddings for {len(embeddings_df)} articles")
-        logger.info(f"Using embedding column: '{embedding_column}'")
-    elif cb_st_enabled or content_mode == "embeddings":
-        # CB-ST requires pre-calculated embeddings - throw error
-        logger.error("=" * 60)
-        logger.error("ERROR: Pre-calculated embeddings are REQUIRED for CB-ST")
-        logger.error("=" * 60)
-        logger.error(f"Expected file: {embeddings_path}")
-        logger.error("")
-        logger.error("Generate embeddings first with:")
-        logger.error(f"  python scripts/generate_embeddings.py --input-dir {input_path}")
-        logger.error("")
-        logger.error("Or disable CB-ST by removing it from the algorithms list.")
-        logger.error("=" * 60)
-        raise FileNotFoundError(
-            f"Pre-calculated embeddings required for content_mode='{content_mode}' but not found at "
-            f"{embeddings_path}. Generate with: python scripts/generate_embeddings.py --input-dir {input_path}"
-        )
-    else:
-        logger.info(f"No pre-calculated embeddings found at {embeddings_path}")
-        logger.info("CB-ST is not enabled, continuing without embeddings")
-    
-    # Load articles for topic-level diversity metrics (CoverageK_topics, GiniK_topics)
-    articles_df = None
-    articles_cleaned_path = session.get_path("articles_cleaned.parquet")
-    if Path(articles_cleaned_path).exists():
-        articles_df = load_dataframe(articles_cleaned_path)
-        logger.info(f"Loaded {len(articles_df)} articles for topic diversity metrics")
-    else:
-        logger.info("No articles_cleaned.parquet found; topic-level diversity metrics will be skipped")
-
-    # Run evaluation per cluster
-    results_dir = session.get_path("evaluation_results")
-    
-    # Extract algorithm names and params from AlgorithmConfig objects
-    algorithm_names = [algo.name for algo in config.evaluation.algorithms if algo.enabled]
-    algorithm_params = {
-        algo.name: dict(algo.params)
-        for algo in config.evaluation.algorithms
-        if algo.enabled and getattr(algo, "params", None)
-    }
-    algorithm_grids = {
-        algo.name: dict(algo.grid)
-        for algo in config.evaluation.algorithms
-        if algo.enabled and getattr(algo, "grid", None) and algo.grid
-    }
-    
-    # NOTE: Hard to follow the full config trail, is this set to True for the DPG experiments?
-    # ANSWER: Yes, otherwise it trains a separate model per cluster, which is not what we want for the DPG experiments (how does one model perform on the different clusters?)
-    train_on_full = config.evaluation.train_on_full_dataset
-    
-    if train_on_full:
-        # Legacy-style: train once on full dataset, aggregate metrics per cluster
-        logger.info("Using LEGACY-STYLE evaluation (train on full dataset, aggregate per cluster)")
-        results = run_cluster_evaluation_legacy_style(
-            interactions_df=interactions_df,
-            users_df=users_df,
-            content_df=content_df,
-            articles_df=articles_df,
-            algorithms=algorithm_names,
-            algorithm_params=algorithm_params,
-            algorithm_grids=algorithm_grids,
-            k_values=config.evaluation.k_values,
-            min_items_per_user=config.clustering.min_impressions_per_user,
-            output_dir=results_dir,
-            embeddings_df=embeddings_df,
-            embedding_column=embedding_column,
-            n_most_recent_in=config.evaluation.n_most_recent_in,
-            optimization_metric=config.evaluation.optimization_metric,
-            optimization_k=config.evaluation.optimization_k,
-        )
-    else:
-        # Per-cluster training: train a separate model per cluster
-        logger.info("Using PER-CLUSTER training (train separate model per cluster)")
-        results = run_cluster_evaluation(
-            interactions_df=interactions_df,
-            users_df=users_df,
-            content_df=content_df,
-            articles_df=articles_df,
-            algorithms=algorithm_names,
-            algorithm_params=algorithm_params,
-            k_values=config.evaluation.k_values,
-            min_items_per_user=config.clustering.min_impressions_per_user,
-            output_dir=results_dir,
-            n_jobs=1,
-            embeddings_df=embeddings_df,
-            embedding_column=embedding_column,
-        )
-    
-    log_memory("evaluation after cluster run")
-
-    # Analyze results
-    analyzer = ResultsAnalyzer(results)
-    
-    # Generate and save report
-    report = analyzer.generate_report()
-    
-    report_path = session.get_path("evaluation_report.txt")
-    with open(report_path, 'w') as f:
-        f.write(report)
-    
-    logger.info(f"Saved evaluation report to {report_path}")
-    print("\n" + report)
-
-    # Append recommendation performance to cluster profiles Excel
-    try:
-        append_recommendation_performance(session, results)
-    except Exception as _e:
-        logger.warning(f"Could not append recommendation performance sheet: {_e}")
-    
-    log_memory("evaluation end")
-    return results
+    logger.info(
+        "Appended Recommendation Performance sheet to cluster_profiles.xlsx")
 
 
 def main():
     """Main entry point."""
     args = parse_args()
-    
+
     # Setup logging
     log_level = "DEBUG" if args.verbose else "INFO"
     setup_logging(level=log_level)
-    
+
     logger.info("Starting RICON Analysis Pipeline")
     logger.info(f"Time: {datetime.now().isoformat()}")
-    
+
     # Load config
     try:
         config = load_or_create_config(args)
     except Exception as e:
         logger.error(f"Failed to load config: {e}")
         sys.exit(1)
-    
 
-    
     # Create session using the config
     session = Session(config=config)
 
     # Log resolved runtime parameters in one canonical block.
     log_resolved_config(config)
-    
+
     logger.info(f"Session directory: {session.session_dir}")
-    
+
     # Save config to session
     save_config(config, session.get_path("config.json"))
-    
+
     try:
         # Step 1: Conversion
         if args.skip_conversion:
             logger.info("Skipping conversion, loading existing data...")
             articles_df = load_dataframe(session.get_path("articles.parquet"))
-            impressions_df = load_dataframe(session.get_path("impressions.parquet"))
+            impressions_df = load_dataframe(
+                session.get_path("impressions.parquet"))
         else:
             articles_df, impressions_df = run_conversion(config, session)
-        
+
         # Step 2: Preprocessing
         articles_df, impressions_df, interactions_df = run_preprocessing(
             articles_df, impressions_df, config, session,
         )
         gc.collect()
-        
+
         # Step 3: Clustering
         if args.skip_clustering:
             logger.info("Skipping clustering, loading existing clusters...")
-            users_df = load_dataframe(session.get_path("user_clusters.parquet"))
+            users_df = load_dataframe(
+                session.get_path("user_clusters.parquet"))
         else:
             features_df, labels, cluster_info = run_clustering(
                 impressions_df, articles_df, config, session
@@ -1618,12 +1728,13 @@ def main():
         # Raw article/impression frames are not needed after clustering.
         del articles_df, impressions_df
         gc.collect()
-        
+
         # Step 4: Evaluation
         if not args.skip_evaluation:
             content_df = None
             if config.evaluation.content_mode != "embeddings":
-                content_df = load_dataframe(session.get_path("articles_content.csv"))
+                content_df = load_dataframe(
+                    session.get_path("articles_content.csv"))
             results = run_evaluation(
                 interactions_df, users_df, content_df, config, session
             )
@@ -1634,12 +1745,12 @@ def main():
 
         del interactions_df, users_df
         gc.collect()
-        
+
         logger.info("=" * 60)
         logger.info("Pipeline completed successfully!")
         logger.info(f"Results saved to: {session.session_dir}")
         logger.info("=" * 60)
-        
+
     except Exception as e:
         logger.error(f"Pipeline failed: {e}")
         import traceback

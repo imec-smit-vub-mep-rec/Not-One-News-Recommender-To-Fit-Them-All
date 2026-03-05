@@ -26,9 +26,13 @@ flowchart TB
 ```
 
 **Optional steps before running the pipeline:**
+- **Dataset description:** `run_dataset_description.py` – Generate descriptive statistics, distributions, and outlier analysis (including suggested `--remove-top` for clustering)
 - **EB-NeRD:** `combine_behaviors.py` (merge train/validation) → `generate_embeddings.py` (if CB-ST)
 - **Adressa:** `generate_embeddings.py` (if CB-ST)
 - **AD/HLN/VK:** Embeddings from `article_metadata.csv` during conversion
+
+**Optional step after running the pipeline:**
+- **Sensitivity analysis:** `run_sensitivity_analysis.py` – Analyse clustering robustness (scalers, MiniBatch, diagnostics)
 
 | Step | Description |
 |------|--------------|
@@ -374,13 +378,65 @@ runs/ebnerd_20241215_120000/
 │   ├── ...
 │   ├── legacy_format/           # Per-user files (Algorithm_k.csv)
 │   └── coverage_summary.csv     # Per-cluster coverage
-└── evaluation_report.txt
+├── evaluation_report.txt
+├── dataset_description/        # From run_dataset_description.py (optional)
+│   ├── dataset_description.json
+│   └── *.png                    # Distributions, outlier plots
+└── sensitivity_analysis/       # From run_sensitivity_analysis.py (optional)
+    ├── results/sensitivity_results.json
+    └── visualizations/          # Scalers, n_init, feature importance, etc.
 ```
 
 **Sync to S3:**
 ```bash
 aws s3 sync runs/ s3://<bucket>/<results-prefix>/runs/
 ```
+
+---
+
+## Analysis Scripts
+
+### Dataset Description (`run_dataset_description.py`)
+
+Generates a dataset overview **before** running the pipeline: descriptive statistics, distributions, temporal patterns, outlier detection, and a suggested `--remove-top` value for clustering.
+
+**Usage:**
+
+```bash
+# From config (runs conversion automatically)
+python scripts/run_dataset_description.py --config config/config_ebnerd_small.json
+
+# From dataset preset
+python scripts/run_dataset_description.py --dataset ebnerd --input-dir data/ebnerd/ebnerd_small
+
+# From already-converted data
+python scripts/run_dataset_description.py --data-dir runs/ebnerd_20260302_142823/data
+
+# Custom output directory
+python scripts/run_dataset_description.py --data-dir runs/ebnerd_20260302_142823/data -o reports/ebnerd
+```
+
+**Outputs:** `dataset_description.json`, console report, and visualizations (impressions/sessions/reading-time distributions, category bar chart, temporal patterns, outlier boxplots and scatter, composite score removal curve). The **composite outlier analysis** ranks users by L2 norm of z-scores and suggests `--remove-top` using gap ratios in the score curve.
+
+---
+
+### Sensitivity Analysis (`run_sensitivity_analysis.py`)
+
+Runs **after** a pipeline to assess clustering robustness. Evaluates:
+
+- **Part A** – MiniBatchKMeans sensitivity (batch size, `n_init` stability)
+- **Part B** – Scaler comparison (Standard, MinMax, Robust, Log1p+Standard)
+- **Part C** – Clustering diagnostics (entropy, feature importance, centroid radar)
+
+**Usage:**
+
+```bash
+python scripts/run_sensitivity_analysis.py --run-dir runs/ebnerd_20260302_142823
+```
+
+**Options:** `--skip-part-a`, `--skip-part-b`, `--skip-part-c` to run subsets; `--silhouette-sample-size 10000` for large datasets; `--radar-top-features 12`.
+
+**Outputs:** `sensitivity_analysis/{results/sensitivity_results.json, visualizations/, logs/}`.
 
 ---
 
@@ -397,8 +453,10 @@ not-one-recommender-to-fit-them-all/
 ├── scripts/
 │   ├── run_full_pipeline.py
 │   ├── run_conversion.py, run_clustering.py, run_evaluation.py
-│   ├── combine_behaviors.py    # EB-NeRD only
-│   └── generate_embeddings.py  # EB-NeRD, Adressa
+│   ├── run_dataset_description.py   # Pre-pipeline: stats, distributions, outlier analysis
+│   ├── run_sensitivity_analysis.py  # Post-pipeline: clustering robustness
+│   ├── combine_behaviors.py        # EB-NeRD only
+│   └── generate_embeddings.py       # EB-NeRD, Adressa
 ├── config_ebnerd.json, config_adressa.json, config_ad.json, ...
 └── requirements.txt
 ```

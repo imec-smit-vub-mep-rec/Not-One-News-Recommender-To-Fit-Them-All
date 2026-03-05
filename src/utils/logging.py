@@ -71,6 +71,11 @@ def setup_logging(
         file_handler.setLevel(level)
         file_handler.setFormatter(formatter)
         logger.addHandler(file_handler)
+        
+        # Forward recpack logs to session file (they don't propagate to ricon)
+        recpack_logger = logging.getLogger("recpack")
+        if file_handler not in recpack_logger.handlers:
+            recpack_logger.addHandler(file_handler)
     
     # Reduce verbosity of third-party loggers
     logging.getLogger("recpack").setLevel(logging.WARNING)

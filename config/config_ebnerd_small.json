@@ -6,7 +6,7 @@
   "clustering": {
     "k_selection_method": "elbow",
     "legacy_features": true,
-    "remove_top": 2
+    "remove_top": 0
   },
   "evaluation": {
     "k_values": [10, 20, 50],
@@ -27,9 +27,13 @@
       { "name": "EASE", "enabled": true, "grid": { "l2": [1, 10, 100, 1000] } },
       {
         "name": "MultVAE",
-        "enabled": false,
-        "params": {
-          "max_epochs": 20
+        "enabled": true,
+        "params": { "batch_size": 500, "dropout": 0.5, "max_epochs": 30 },
+        "grid": {
+          "learning_rate": [0.0001, 0.001],
+          "dim_bottleneck_layer": [100, 200, 400],
+          "dim_hidden_layer": [400, 600],
+          "anneal_steps": [50000, 200000]
         }
       },
       { "name": "CB-ST", "enabled": true }
