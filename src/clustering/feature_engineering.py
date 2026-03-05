@@ -16,6 +16,59 @@ from ..utils.datetime import parse_timestamp_series
 
 logger = get_logger("clustering.feature_engineering")
 
+# Columns that are typically heavy right-tailed in behavior datasets.
+# These are log-transformed (log1p) before standard scaling.
+DEFAULT_LOG1P_COLUMNS = (
+    'num_sessions',
+    'total_impressions',
+    'homepage_impressions',
+    'article_impressions',
+    'unique_articles',
+    'avg_reading_time',
+    'avg_session_duration',
+    'avg_session_length',
+    'impressions_per_session',
+)
+
+
+class _SelectiveLogStandardScaler:
+    """Apply log1p to selected columns, then StandardScaler on all columns."""
+
+    def __init__(self, feature_cols: List[str], log1p_cols: List[str]):
+        self.feature_cols = list(feature_cols)
+        log_set = set(log1p_cols)
+        self.log_indices = [i for i, c in enumerate(self.feature_cols) if c in log_set]
+        self.base_scaler = StandardScaler()
+
+    def _apply_log1p(self, X: np.ndarray) -> np.ndarray:
+        X_work = np.asarray(X, dtype=np.float64).copy()
+        if not self.log_indices:
+            return X_work
+        vals = X_work[:, self.log_indices]
+        if np.any(vals < 0):
+            min_val = float(vals.min())
+            logger.warning(
+                "Negative values found in log1p columns (min=%.6f); clipping to 0 before log1p",
+                min_val,
+            )
+        vals = np.clip(vals, a_min=0, a_max=None)
+        X_work[:, self.log_indices] = np.log1p(vals)
+        return X_work
+
+    def fit_transform(self, X: np.ndarray) -> np.ndarray:
+        X_log = self._apply_log1p(X)
+        return self.base_scaler.fit_transform(X_log)
+
+    def transform(self, X: np.ndarray) -> np.ndarray:
+        X_log = self._apply_log1p(X)
+        return self.base_scaler.transform(X_log)
+
+    def inverse_transform(self, X: np.ndarray) -> np.ndarray:
+        X_inv = self.base_scaler.inverse_transform(X)
+        if self.log_indices:
+            X_inv[:, self.log_indices] = np.expm1(X_inv[:, self.log_indices])
+        return X_inv
+
 
 def create_category_features(
     df: pd.DataFrame,
@@ -512,7 +565,10 @@ def scale_features(
     Args:
         features_df: DataFrame with features
         exclude_cols: Columns to exclude from scaling (e.g., user_id)
-        method: Scaling method ('standard' or 'minmax')
+        method: Scaling method ('standard' or 'minmax').
+            - 'standard': applies log1p to selected heavy-tailed columns
+              (when present), then StandardScaler to all features.
+            - 'minmax': applies MinMaxScaler to all features.
         
     Returns:
         Tuple of (scaled DataFrame, fitted scaler)
@@ -528,7 +584,8 @@ def scale_features(
     
     # Scale
     if method == 'standard':
-        scaler = StandardScaler()
+        log_cols = [c for c in DEFAULT_LOG1P_COLUMNS if c in feature_cols]
+        scaler = _SelectiveLogStandardScaler(feature_cols=feature_cols, log1p_cols=log_cols)
     else:
         from sklearn.preprocessing import MinMaxScaler
         scaler = MinMaxScaler()
@@ -539,7 +596,14 @@ def scale_features(
     scaled_df = features_df.copy()
     scaled_df[feature_cols] = X_scaled
     
-    logger.info(f"Scaled {len(feature_cols)} features using {method} scaling")
+    if method == 'standard':
+        log_cols = [c for c in DEFAULT_LOG1P_COLUMNS if c in feature_cols]
+        logger.info(
+            f"Scaled {len(feature_cols)} features using {method} scaling "
+            f"(log1p applied to {len(log_cols)} columns: {log_cols})"
+        )
+    else:
+        logger.info(f"Scaled {len(feature_cols)} features using {method} scaling")
     
     return scaled_df, scaler
 
