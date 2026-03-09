@@ -11,7 +11,7 @@
     "n_clusters": 4,
     "k_selection_method": "elbow",
     "legacy_features": true,
-    "remove_top": 1
+    "remove_top": 4
   },
   "evaluation": {
     "enabled": false,
