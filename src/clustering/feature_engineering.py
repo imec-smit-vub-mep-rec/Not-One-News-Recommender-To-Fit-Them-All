@@ -17,7 +17,8 @@ from ..utils.datetime import parse_timestamp_series
 logger = get_logger("clustering.feature_engineering")
 
 # Columns that are typically heavy right-tailed in behavior datasets.
-# These are log-transformed (log1p) before standard scaling.
+# These are log-transformed (log1p) before standard scaling when
+# use_log_transform=True.
 DEFAULT_LOG1P_COLUMNS = (
     'num_sessions',
     'total_impressions',
@@ -559,6 +560,7 @@ def scale_features(
     features_df: pd.DataFrame,
     exclude_cols: Optional[List[str]] = None,
     method: str = 'standard',
+    use_log_transform: bool = False,
 ) -> Tuple[pd.DataFrame, Any]:
     """Scale feature values.
     
@@ -566,9 +568,12 @@ def scale_features(
         features_df: DataFrame with features
         exclude_cols: Columns to exclude from scaling (e.g., user_id)
         method: Scaling method ('standard' or 'minmax').
-            - 'standard': applies log1p to selected heavy-tailed columns
-              (when present), then StandardScaler to all features.
+            - 'standard': applies StandardScaler to all features.
+              When use_log_transform=True, applies log1p to selected
+              heavy-tailed columns first.
             - 'minmax': applies MinMaxScaler to all features.
+        use_log_transform: Whether to apply log1p on selected heavy-tailed
+            columns before scaling (standard method only).
         
     Returns:
         Tuple of (scaled DataFrame, fitted scaler)
@@ -584,8 +589,11 @@ def scale_features(
     
     # Scale
     if method == 'standard':
-        log_cols = [c for c in DEFAULT_LOG1P_COLUMNS if c in feature_cols]
-        scaler = _SelectiveLogStandardScaler(feature_cols=feature_cols, log1p_cols=log_cols)
+        if use_log_transform:
+            log_cols = [c for c in DEFAULT_LOG1P_COLUMNS if c in feature_cols]
+            scaler = _SelectiveLogStandardScaler(feature_cols=feature_cols, log1p_cols=log_cols)
+        else:
+            scaler = StandardScaler()
     else:
         from sklearn.preprocessing import MinMaxScaler
         scaler = MinMaxScaler()
@@ -597,11 +605,17 @@ def scale_features(
     scaled_df[feature_cols] = X_scaled
     
     if method == 'standard':
-        log_cols = [c for c in DEFAULT_LOG1P_COLUMNS if c in feature_cols]
-        logger.info(
-            f"Scaled {len(feature_cols)} features using {method} scaling "
-            f"(log1p applied to {len(log_cols)} columns: {log_cols})"
-        )
+        if use_log_transform:
+            log_cols = [c for c in DEFAULT_LOG1P_COLUMNS if c in feature_cols]
+            logger.info(
+                f"Scaled {len(feature_cols)} features using {method} scaling "
+                f"(log1p applied to {len(log_cols)} columns: {log_cols})"
+            )
+        else:
+            logger.info(
+                f"Scaled {len(feature_cols)} features using {method} scaling "
+                "(log1p disabled)"
+            )
     else:
         logger.info(f"Scaled {len(feature_cols)} features using {method} scaling")
     
@@ -620,6 +634,7 @@ def create_user_features(
     include_subscriber: bool = False,
     legacy_mode: bool = False,
     scale: bool = True,
+    use_log_transform: bool = False,
     user_col: str = 'user_id',
 ) -> Tuple[pd.DataFrame, Dict[str, Any]]:
     """Create all user features for clustering.
@@ -647,6 +662,8 @@ def create_user_features(
                      - Keep subscriber as post-hoc reporting only (include_subscriber=False)
                      - Use legacy diversity mode (only num_categories)
         scale: Whether to scale features
+        use_log_transform: Whether to apply log1p on selected heavy-tailed
+            columns before StandardScaler when scale=True.
         user_col: Name of user ID column
         
     Returns:
@@ -675,7 +692,11 @@ def create_user_features(
     # Get unique users as base
     features = df[[user_col]].drop_duplicates().reset_index(drop=True)
     
-    metadata = {'feature_groups': {}, 'legacy_mode': legacy_mode}
+    metadata = {
+        'feature_groups': {},
+        'legacy_mode': legacy_mode,
+        'use_log_transform': use_log_transform,
+    }
     
     # Category features (per-category proportions - NOT in legacy)
     if include_categories and 'category_str' in df.columns:
@@ -755,7 +776,11 @@ def create_user_features(
     
     # Scale features
     if scale:
-        features, scaler = scale_features(features, exclude_cols=[user_col])
+        features, scaler = scale_features(
+            features,
+            exclude_cols=[user_col],
+            use_log_transform=use_log_transform,
+        )
         metadata['scaler'] = scaler
     
     # Store feature columns
@@ -786,6 +811,7 @@ class UserFeatureExtractor:
         include_subscriber: bool = False,
         legacy_mode: bool = False,
         scale: bool = True,
+        use_log_transform: bool = False,
         user_col: str = 'user_id',
     ):
         """Initialize the feature extractor.
@@ -808,6 +834,8 @@ class UserFeatureExtractor:
                          - Keep subscriber as post-hoc reporting only
                          - Use legacy diversity mode (only num_categories)
             scale: Whether to scale features
+            use_log_transform: Whether to apply log1p on selected heavy-tailed
+                columns before StandardScaler when scale=True.
             user_col: Name of user ID column
         """
         self.include_categories = include_categories
@@ -819,6 +847,7 @@ class UserFeatureExtractor:
         self.include_subscriber = include_subscriber
         self.legacy_mode = legacy_mode
         self.scale = scale
+        self.use_log_transform = use_log_transform
         self.user_col = user_col
         
         self.metadata: Dict[str, Any] = {}
@@ -850,6 +879,7 @@ class UserFeatureExtractor:
             include_subscriber=self.include_subscriber,
             legacy_mode=self.legacy_mode,
             scale=self.scale,
+            use_log_transform=self.use_log_transform,
             user_col=self.user_col,
         )
         

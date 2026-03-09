@@ -222,9 +222,14 @@ def run_clustering(
 
     # Check if legacy features mode is enabled
     legacy_mode = config.clustering.legacy_features
+    use_log_transform = config.clustering.use_log_transform
     if legacy_mode:
         logger.info(
             "Using LEGACY feature set (no per-category proportions, no time-of-day, with session behavior features)")
+    logger.info(
+        "Feature scaling: StandardScaler%s",
+        " with selective log1p transform" if use_log_transform else " (no log transform)",
+    )
 
     # Extract features (including homepage behavior - matching legacy clustering)
     # NOTE: what do all the legacy things mean? And are the other things new compared to legacy? Is there overlap?
@@ -238,6 +243,7 @@ def run_clustering(
         include_homepage=True,
         legacy_mode=legacy_mode,  # Use legacy feature set if configured
         scale=True,  # Scale the features to prevent different scales from affecting the clustering result
+        use_log_transform=use_log_transform,
     )
 
     features_df = extractor.fit_transform(impressions_df, articles_df)
@@ -624,6 +630,12 @@ def parse_args():
     )
 
     parser.add_argument(
+        "--log-transform",
+        action="store_true",
+        help="Apply selective log1p transform before StandardScaler for heavy-tailed clustering features (default: disabled)",
+    )
+
+    parser.add_argument(
         "--skip-conversion",
         action="store_true",
         help="Skip data conversion (use existing converted data)",
@@ -772,6 +784,10 @@ def load_or_create_config(args) -> PipelineConfig:
     if args.legacy_features:
         config.clustering.legacy_features = True
         logger.info("CLI override: clustering.legacy_features = True")
+
+    if args.log_transform:
+        config.clustering.use_log_transform = True
+        logger.info("CLI override: clustering.use_log_transform = True")
 
     if args.remove_top is not None:
         config.clustering.remove_top = args.remove_top
@@ -1470,6 +1486,278 @@ def _compute_cluster_distributions(
     return pd.DataFrame(rows)
 
 
+def _compute_clean_variable_statistics(
+    impressions_df: 'pd.DataFrame',
+    users_df: 'pd.DataFrame',
+) -> 'pd.DataFrame':
+    """Compute methodologically clean descriptive stats per cluster.
+
+    The returned statistics are computed at the native granularity of each
+    variable (impression/session/user) instead of taking cluster-level means
+    of already-averaged variables.
+    """
+    import pandas as pd
+
+    user_cluster = users_df.drop_duplicates().set_index('user_id')['cluster_id']
+    df = impressions_df[impressions_df['user_id'].isin(user_cluster.index)].copy()
+    if df.empty:
+        return pd.DataFrame()
+
+    df['cluster_id'] = df['user_id'].map(user_cluster)
+
+    def _append_metric(
+        rows: list[dict],
+        metric_df: 'pd.DataFrame',
+        value_col: str,
+        variable: str,
+        description: str,
+        granularity: str,
+    ) -> None:
+        vals = metric_df[['cluster_id', value_col]].dropna()
+        if vals.empty:
+            return
+        agg = (
+            vals.groupby('cluster_id')[value_col]
+            .agg(['mean', 'std', 'median', 'min', 'max', 'count'])
+            .reset_index()
+        )
+        for _, r in agg.iterrows():
+            rows.append({
+                'cluster_id': r['cluster_id'],
+                'variable': variable,
+                'description': description,
+                'granularity': granularity,
+                'mean': round(float(r['mean']), 4),
+                'std': round(float(r['std']), 4) if pd.notna(r['std']) else np.nan,
+                'median': round(float(r['median']), 4),
+                'min': round(float(r['min']), 4),
+                'max': round(float(r['max']), 4),
+                'n_observations': int(r['count']),
+            })
+
+    rows: list[dict] = []
+
+    # Impression-level variables.
+    if 'read_time' in df.columns:
+        _append_metric(
+            rows, df, 'read_time', 'reading_time_per_impression',
+            'Raw read_time value for each impression.', 'impression',
+        )
+    if 'scroll_depth' in df.columns:
+        _append_metric(
+            rows, df, 'scroll_depth', 'scroll_depth_per_impression',
+            'Raw scroll depth value for each impression.', 'impression',
+        )
+
+    # Session-level variables.
+    if 'session_id' in df.columns:
+        session_df = df[df['session_id'].notna()].copy()
+        if not session_df.empty:
+            session_sizes = (
+                session_df.groupby(['cluster_id', 'user_id', 'session_id'])
+                .size()
+                .reset_index(name='impressions_per_session')
+            )
+            _append_metric(
+                rows, session_sizes, 'impressions_per_session', 'impressions_per_session',
+                'Number of impressions in each (user, session) pair.', 'session',
+            )
+
+            if 'read_time' in session_df.columns:
+                session_rt = (
+                    session_df.groupby(['cluster_id', 'user_id', 'session_id'])['read_time']
+                    .sum()
+                    .reset_index(name='reading_time_per_session')
+                )
+                _append_metric(
+                    rows, session_rt, 'reading_time_per_session', 'reading_time_per_session',
+                    'Total read_time summed over all impressions in a session.', 'session',
+                )
+
+            if 'category_str' in session_df.columns:
+                cat_df = session_df[
+                    session_df['category_str'].notna() & (session_df['category_str'] != '')
+                ][['cluster_id', 'user_id', 'session_id', 'category_str']].copy()
+                if not cat_df.empty:
+                    if 'impression_time' in session_df.columns:
+                        ts = parse_timestamp_series(
+                            session_df.loc[cat_df.index, 'impression_time'])
+                        cat_df['_ts'] = ts
+                        cat_df = cat_df.sort_values(
+                            ['cluster_id', 'user_id', 'session_id', '_ts'])
+                    else:
+                        cat_df = cat_df.sort_values(
+                            ['cluster_id', 'user_id', 'session_id'])
+
+                    grp_keys = ['cluster_id', 'user_id', 'session_id']
+                    prev_cat = cat_df.groupby(grp_keys)['category_str'].shift(1)
+                    switches = ((cat_df['category_str'] != prev_cat)
+                                & prev_cat.notna()).astype(int)
+                    cat_switches = (
+                        switches.groupby([cat_df[k] for k in grp_keys])
+                        .sum()
+                        .reset_index(name='category_switches_per_session')
+                    )
+                    _append_metric(
+                        rows, cat_switches, 'category_switches_per_session',
+                        'category_switches_per_session',
+                        'Count of within-session category transitions between consecutive impressions.',
+                        'session',
+                    )
+
+            # User-level variables derived from sessions.
+            sessions_per_user = (
+                session_df.groupby(['cluster_id', 'user_id'])['session_id']
+                .nunique()
+                .reset_index(name='sessions_per_user')
+            )
+            _append_metric(
+                rows, sessions_per_user, 'sessions_per_user', 'sessions_per_user',
+                'Number of unique sessions for each user.', 'user',
+            )
+
+    # User-level variables from article/homepage behavior.
+    impressions_per_user = (
+        df.groupby(['cluster_id', 'user_id'])
+        .size()
+        .reset_index(name='impressions_per_user')
+    )
+    _append_metric(
+        rows, impressions_per_user, 'impressions_per_user', 'impressions_per_user',
+        'Total number of impressions for each user.', 'user',
+    )
+
+    if 'read_time' in df.columns:
+        read_time_per_user = (
+            df.groupby(['cluster_id', 'user_id'])['read_time']
+            .sum()
+            .reset_index(name='reading_time_per_user')
+        )
+        _append_metric(
+            rows, read_time_per_user, 'reading_time_per_user', 'reading_time_per_user',
+            'Total read_time summed over all impressions for each user.', 'user',
+        )
+
+    if 'article_id' in df.columns:
+        is_homepage = df['article_id'].isna() | df['article_id'].eq('homepage')
+        hp_counts = (
+            df[is_homepage]
+            .groupby(['cluster_id', 'user_id'])
+            .size()
+            .reset_index(name='homepage_impressions_per_user')
+        )
+        art_counts = (
+            df[~is_homepage]
+            .groupby(['cluster_id', 'user_id'])
+            .size()
+            .reset_index(name='article_impressions_per_user')
+        )
+        _append_metric(
+            rows, hp_counts, 'homepage_impressions_per_user', 'homepage_impressions_per_user',
+            'Number of homepage impressions for each user.', 'user',
+        )
+        _append_metric(
+            rows, art_counts, 'article_impressions_per_user', 'article_impressions_per_user',
+            'Number of article impressions for each user.', 'user',
+        )
+        joined = hp_counts.merge(
+            art_counts, on=['cluster_id', 'user_id'], how='outer').fillna(0)
+        total = joined['homepage_impressions_per_user'] + joined['article_impressions_per_user']
+        joined['homepage_ratio_per_user'] = np.where(
+            total > 0, joined['homepage_impressions_per_user'] / total, 0.0)
+        _append_metric(
+            rows, joined, 'homepage_ratio_per_user', 'homepage_ratio_per_user',
+            'Share of homepage impressions out of total impressions for each user.', 'user',
+        )
+
+    if 'category_str' in df.columns:
+        valid_cat = df[df['category_str'].notna() & (df['category_str'] != '')]
+        if not valid_cat.empty:
+            cat_per_user = (
+                valid_cat.groupby(['cluster_id', 'user_id'])['category_str']
+                .nunique()
+                .reset_index(name='unique_categories_per_user')
+            )
+            _append_metric(
+                rows, cat_per_user, 'unique_categories_per_user', 'unique_categories_per_user',
+                'Number of distinct categories consumed by each user.', 'user',
+            )
+
+            cat_counts = (
+                valid_cat.groupby(['cluster_id', 'user_id', 'category_str'])
+                .size()
+                .reset_index(name='n')
+            )
+            entropy_rows = []
+            gini_rows = []
+            for (cluster_id, user_id), group in cat_counts.groupby(['cluster_id', 'user_id']):
+                counts_arr = group['n'].to_numpy(dtype=np.float64)
+                probs = counts_arr / counts_arr.sum()
+                entropy = float(-(probs * np.log(probs + 1e-10)).sum())
+
+                n_cats = len(counts_arr)
+                sorted_counts = np.sort(counts_arr)
+                rs = sorted_counts.sum()
+                idx_arr = np.arange(1, n_cats + 1, dtype=np.float64)
+                numerator = ((2.0 * idx_arr - n_cats - 1.0) * sorted_counts).sum()
+                denominator = n_cats * rs + 1e-10
+                gini = float(numerator / denominator) if rs > 0 else 0.0
+
+                entropy_rows.append({
+                    'cluster_id': cluster_id,
+                    'user_id': user_id,
+                    'category_entropy_per_user': entropy,
+                })
+                gini_rows.append({
+                    'cluster_id': cluster_id,
+                    'user_id': user_id,
+                    'category_gini_per_user': gini,
+                })
+
+            if entropy_rows:
+                entropy_df = pd.DataFrame(entropy_rows)
+                _append_metric(
+                    rows, entropy_df, 'category_entropy_per_user', 'category_entropy_per_user',
+                    'Shannon entropy of each user category distribution.', 'user',
+                )
+            if gini_rows:
+                gini_df = pd.DataFrame(gini_rows)
+                _append_metric(
+                    rows, gini_df, 'category_gini_per_user', 'category_gini_per_user',
+                    'Gini concentration of each user category distribution.', 'user',
+                )
+
+    if 'impression_time' in df.columns:
+        dt = parse_timestamp_series(df['impression_time'])
+        span = (
+            pd.DataFrame({
+                'cluster_id': df['cluster_id'].values,
+                'user_id': df['user_id'].values,
+                '_ts': dt,
+            })
+            .dropna(subset=['_ts'])
+            .groupby(['cluster_id', 'user_id'])['_ts']
+            .agg(['min', 'max'])
+            .reset_index()
+        )
+        if not span.empty:
+            span['engagement_span_days_per_user'] = (
+                span['max'] - span['min']).dt.total_seconds() / (24 * 3600)
+            _append_metric(
+                rows, span, 'engagement_span_days_per_user', 'engagement_span_days_per_user',
+                'Time span in days between first and last impression for each user.', 'user',
+            )
+
+    if not rows:
+        return pd.DataFrame()
+
+    out = pd.DataFrame(rows)
+    metric_cols = ['mean', 'std', 'median', 'min', 'max']
+    out[metric_cols] = out[metric_cols].round(4)
+    out = out.sort_values(['cluster_id', 'granularity', 'variable']).reset_index(drop=True)
+    return out
+
+
 def save_cluster_profiles_excel(
     features_df: 'pd.DataFrame',
     labels: 'np.ndarray',
@@ -1499,6 +1787,9 @@ def save_cluster_profiles_excel(
         proportion.
       - **Cluster Distributions**: percentile breakdowns (p25, median, p75)
         of key per-user metrics within each cluster.
+      - **Clean Variable Statistics**: descriptive statistics (mean, std,
+        median, min, max) for variables computed at their native granularity
+        (impression/session/user), each with a clear variable description.
 
     Args:
         features_df: DataFrame with user features *and* ``cluster_id`` column.
@@ -1588,6 +1879,14 @@ def save_cluster_profiles_excel(
     if user_metrics is not None:
         distributions = _compute_cluster_distributions(user_metrics)
 
+    # --- Sheet 7: Clean variable statistics -----------------------------------------
+    clean_variable_stats = None
+    if impressions_df is not None:
+        _users = features_df[['user_id', 'cluster_id']].drop_duplicates()
+        clean_variable_stats = _compute_clean_variable_statistics(
+            impressions_df, _users,
+        )
+
     # --- Write workbook -------------------------------------------------------------
     with pd.ExcelWriter(excel_path, engine="openpyxl") as writer:
         if cluster_summary is not None:
@@ -1602,6 +1901,9 @@ def save_cluster_profiles_excel(
         if distributions is not None and not distributions.empty:
             distributions.to_excel(
                 writer, sheet_name="Cluster Distributions", index=False)
+        if clean_variable_stats is not None and not clean_variable_stats.empty:
+            clean_variable_stats.to_excel(
+                writer, sheet_name="Clean Variable Statistics", index=False)
 
     logger.info(f"Saved cluster profiles Excel to {excel_path}")
     return excel_path
@@ -1730,7 +2032,7 @@ def main():
         gc.collect()
 
         # Step 4: Evaluation
-        if not args.skip_evaluation:
+        if not args.skip_evaluation and config.evaluation.enabled:
             content_df = None
             if config.evaluation.content_mode != "embeddings":
                 content_df = load_dataframe(

@@ -39,7 +39,7 @@ import seaborn as sns
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.config import PipelineConfig, load_config, PRESET_CONFIGS
-from src.converters import AdressaConverter, EBNeRDConverter
+from src.converters import ADConverter, AdressaConverter, EBNeRDConverter
 from src.utils import setup_logging, get_logger, load_dataframe, ensure_dir
 from src.utils.datetime import parse_timestamp_series
 
@@ -116,6 +116,10 @@ def load_data(args) -> tuple:
         articles_df = converter.convert_articles()
     elif fmt == "parquet" or config.dataset.name == "ebnerd":
         converter = EBNeRDConverter(config=config.dataset)
+        articles_df = converter.convert_articles()
+        impressions_df = converter.convert_impressions()
+    elif fmt == "spark_csv" or config.dataset.name in ("ad", "hln", "vk"):
+        converter = ADConverter(config=config.dataset)
         articles_df = converter.convert_articles()
         impressions_df = converter.convert_impressions()
     else:
@@ -718,10 +722,12 @@ def plot_article_popularity(impressions_df: pd.DataFrame, output_dir: str):
 
     with plt.rc_context(PLOT_STYLE):
         article_counts = article_impressions["article_id"].value_counts()
+        # Use float to avoid Int64 dtype rejecting float quantile/clip values
+        counts_f = article_counts.astype(float)
 
         fig, axes = plt.subplots(1, 2, figsize=(14, 5))
 
-        axes[0].hist(article_counts.clip(upper=article_counts.quantile(0.99)), bins=60, color=sns.color_palette(PALETTE)[4], edgecolor="white", linewidth=0.3)
+        axes[0].hist(counts_f.clip(upper=counts_f.quantile(0.99)), bins=60, color=sns.color_palette(PALETTE)[4], edgecolor="white", linewidth=0.3)
         axes[0].set_title("Article Popularity (clipped at 99th pctl)")
         axes[0].set_xlabel("Number of impressions")
         axes[0].set_ylabel("Number of articles")

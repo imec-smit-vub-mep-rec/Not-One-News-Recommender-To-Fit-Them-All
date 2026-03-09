@@ -54,6 +54,8 @@ class ClusteringConfig:
         max_clusters: Maximum clusters to test in elbow method
         random_state: Random seed for reproducibility
         scaler: Scaler type ('standard', 'minmax', 'robust')
+        use_log_transform: If True, apply log1p to selected heavy-tailed
+                           behavior features before StandardScaler
         imputation_strategy: Strategy for missing values ('mean', 'median', 'zero')
         min_impressions_per_user: Minimum impressions required per user
         k_selection_method: Method for selecting K ('elbow', 'silhouette', 'manual')
@@ -87,6 +89,7 @@ class ClusteringConfig:
     max_clusters: int = 10
     random_state: int = 42
     scaler: str = "standard"
+    use_log_transform: bool = False
     imputation_strategy: str = "mean"
     min_impressions_per_user: int = 5
     k_selection_method: str = "elbow"
@@ -121,6 +124,7 @@ class EvaluationConfig:
     """Configuration for RecPack evaluation.
     
     Attributes:
+        enabled: If False, skip evaluation step (clustering-only run)
         algorithms: List of algorithm configurations
         scenarios: List of scenario names to run
         metrics: List of metric names
@@ -170,6 +174,7 @@ class EvaluationConfig:
             }
         ),
     ])
+    enabled: bool = True  # If False, skip evaluation (clustering-only run)
     scenarios: List[str] = field(default_factory=lambda: [
         'WeakGeneralization',
         'Timed',
