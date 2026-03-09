@@ -8,7 +8,7 @@
     "start_time_max": "2026-01-12T19:19:58.665Z"
   },
   "clustering": {
-
+    "n_clusters": 4,
     "k_selection_method": "elbow",
     "legacy_features": true,
     "remove_top": 0
