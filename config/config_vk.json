@@ -10,7 +10,8 @@
   "clustering": {
     "k_selection_method": "elbow",
     "legacy_features": true,
-    "remove_top": 2
+    "remove_top": 2,
+    "outlier_removal_basis": "count_total_impressions"
   },
   "evaluation": {
     "enabled": false,

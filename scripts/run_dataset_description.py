@@ -25,7 +25,7 @@ import json
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List
 
 import matplotlib
 matplotlib.use("Agg")
@@ -72,6 +72,12 @@ def parse_args():
     parser.add_argument("--dataset", type=str, choices=list(PRESET_CONFIGS.keys()), help="Dataset preset name (use with --config)")
     parser.add_argument("--input-dir", type=str, help="Raw data directory (used with --dataset)")
     parser.add_argument("--output-dir", "-o", type=str, default=None, help="Output directory for report and plots (default: auto)")
+    parser.add_argument(
+        "--outlier-removal-basis",
+        type=str,
+        default="composite_score",
+        help="Ranking basis for outlier-removal analyses: 'composite_score' (default) or a numeric per-user metric (e.g., 'total_impressions').",
+    )
     parser.add_argument("--verbose", "-v", action="store_true", help="Verbose logging")
     return parser.parse_args()
 
@@ -374,6 +380,50 @@ def compute_composite_outlier_scores(user_stats: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
+def build_outlier_ranking(user_stats: pd.DataFrame, basis: str) -> dict:
+    """Build user ranking for outlier-removal analysis."""
+    selected_basis = basis.strip()
+    if selected_basis == "composite_score":
+        composite_scores = compute_composite_outlier_scores(user_stats)
+        if composite_scores.empty:
+            raise ValueError("No numeric metrics are available to compute composite outlier scores.")
+        score_series = composite_scores["composite_score"].sort_values(ascending=False)
+        return {
+            "basis": selected_basis,
+            "mode": "composite",
+            "score_label": "Composite score (L2 norm of z-scores)",
+            "score_series": score_series,
+            "ranked_user_ids": score_series.index.tolist(),
+            "composite_scores": composite_scores,
+        }
+
+    if selected_basis not in user_stats.columns:
+        available = user_stats.select_dtypes(include=[np.number]).columns.tolist()
+        raise ValueError(
+            f"Unknown outlier-removal basis '{selected_basis}'. "
+            f"Use 'composite_score' or one of these numeric user metrics: {available}"
+        )
+
+    if not pd.api.types.is_numeric_dtype(user_stats[selected_basis]):
+        raise ValueError(
+            f"Outlier-removal basis '{selected_basis}' is not numeric. "
+            "Select 'composite_score' or a numeric per-user metric."
+        )
+
+    score_series = user_stats[selected_basis].dropna().sort_values(ascending=False)
+    if score_series.empty:
+        raise ValueError(f"Outlier-removal basis '{selected_basis}' has no valid (non-null) values.")
+
+    return {
+        "basis": selected_basis,
+        "mode": "feature",
+        "score_label": selected_basis,
+        "score_series": score_series,
+        "ranked_user_ids": score_series.index.tolist(),
+        "composite_scores": pd.DataFrame(),
+    }
+
+
 def suggest_remove_top(scores: pd.Series, max_candidates: int = 50) -> dict:
     """Analyse the top composite scores to suggest a ``remove_top`` value.
 
@@ -412,6 +462,37 @@ def suggest_remove_top(scores: pd.Series, max_candidates: int = 50) -> dict:
         "gap_ratio": round(best_gap_ratio, 4),
         "removal_curve": curve,
     }
+
+
+def build_total_impressions_removal_series(
+    user_stats: pd.DataFrame,
+    ranked_user_ids: List,
+    removals: Optional[List[int]] = None,
+) -> pd.DataFrame:
+    """Prepare per-user total_impressions values after removing top-N ranked users."""
+    if "total_impressions" not in user_stats.columns:
+        raise ValueError("The per-user metric 'total_impressions' is required for this plot.")
+
+    if removals is None:
+        removals = [0, 1, 2, 3, 4, 5]
+
+    values = user_stats["total_impressions"].dropna()
+    if values.empty:
+        return pd.DataFrame(columns=["remove_top", "total_impressions"])
+
+    rows = []
+    for n in removals:
+        n = max(0, int(n))
+        remove_ids = set(ranked_user_ids[:n])
+        remaining = values.loc[~values.index.isin(remove_ids)]
+        if remaining.empty:
+            # Keep explicit category so the plot still shows this removal level.
+            rows.append({"remove_top": n, "total_impressions": np.nan})
+            continue
+        for val in remaining.tolist():
+            rows.append({"remove_top": n, "total_impressions": float(val)})
+
+    return pd.DataFrame(rows)
 
 
 # ---------------------------------------------------------------------------
@@ -715,6 +796,43 @@ def plot_removal_curve(composite_scores: pd.DataFrame, suggestion: dict, output_
         _save_fig(fig, f"{output_dir}/outlier_score_distribution.png")
 
 
+def plot_total_impressions_boxplots_by_removal(
+    user_stats: pd.DataFrame,
+    ranked_user_ids: List,
+    output_dir: str,
+):
+    """Plot total_impressions boxplots after removing top n outlier-ranked users."""
+    try:
+        plot_df = build_total_impressions_removal_series(user_stats, ranked_user_ids, removals=[0, 1, 2, 3, 4, 5])
+    except ValueError as e:
+        logger.warning(f"Skipping total_impressions removal boxplots: {e}")
+        return
+
+    if plot_df.empty:
+        return
+
+    order = [0, 1, 2, 3, 4, 5]
+    plot_df["remove_top"] = pd.Categorical(plot_df["remove_top"], categories=order, ordered=True)
+
+    with plt.rc_context(PLOT_STYLE):
+        fig, ax = plt.subplots(figsize=(12, 6))
+        sns.boxplot(
+            data=plot_df,
+            x="remove_top",
+            y="total_impressions",
+            color=sns.color_palette(PALETTE)[0],
+            fliersize=2,
+            order=order,
+            ax=ax,
+        )
+        ax.set_title("Total Impressions per User by Outlier Removal (n=0..5)")
+        ax.set_xlabel("Top n ranked users removed")
+        ax.set_ylabel("Total impressions per user")
+        ax.yaxis.set_major_formatter(ticker.FuncFormatter(lambda x, _: f"{x:,.0f}"))
+        fig.tight_layout()
+        _save_fig(fig, f"{output_dir}/total_impressions_boxplots_by_removal.png")
+
+
 def plot_article_popularity(impressions_df: pd.DataFrame, output_dir: str):
     article_impressions = impressions_df[impressions_df["article_id"].notna()]
     if article_impressions.empty:
@@ -757,6 +875,7 @@ def format_console_report(
     outliers: dict,
     cat_stats: Optional[pd.DataFrame],
     composite_suggestion: Optional[dict] = None,
+    outlier_ranking: Optional[dict] = None,
 ) -> str:
     lines = []
     sep = "=" * 70
@@ -836,6 +955,12 @@ def format_console_report(
             lines.append("    " + "  ".join(f"{v:<20s}" for v in vals))
 
     # Composite outlier score / removal suggestion
+    if outlier_ranking:
+        lines.append("\n--- Outlier Removal Basis ---")
+        lines.append(f"  Basis:   {outlier_ranking['basis']}")
+        lines.append(f"  Mode:    {outlier_ranking['mode']}")
+        lines.append(f"  Ranking: remove top users with highest '{outlier_ranking['score_label']}'")
+
     if composite_suggestion:
         lines.append("\n--- Composite Outlier Score (multivariate) ---")
         suggested = composite_suggestion["suggested_remove_top"]
@@ -895,12 +1020,35 @@ def main():
     logger.info("Detecting outliers...")
     outliers = detect_outliers(user_stats)
 
-    logger.info("Computing composite outlier scores...")
-    composite_scores = compute_composite_outlier_scores(user_stats)
-    composite_suggestion = suggest_remove_top(composite_scores["composite_score"]) if not composite_scores.empty else None
+    logger.info("Computing outlier-removal ranking...")
+    try:
+        outlier_ranking = build_outlier_ranking(user_stats, args.outlier_removal_basis)
+    except ValueError as e:
+        logger.error(str(e))
+        sys.exit(1)
+    logger.info(
+        "Using outlier-removal basis '%s' (%s mode)",
+        outlier_ranking["basis"],
+        outlier_ranking["mode"],
+    )
+
+    composite_scores = outlier_ranking["composite_scores"]
+    if outlier_ranking["mode"] == "composite":
+        composite_suggestion = suggest_remove_top(outlier_ranking["score_series"])
+    else:
+        composite_suggestion = None
 
     # Console report
-    report = format_console_report(basic, missing, user_stats, temporal, outliers, cat_stats, composite_suggestion)
+    report = format_console_report(
+        basic,
+        missing,
+        user_stats,
+        temporal,
+        outliers,
+        cat_stats,
+        composite_suggestion,
+        outlier_ranking,
+    )
     print("\n" + report)
 
     # Save JSON report
@@ -926,6 +1074,19 @@ def main():
         "temporal_patterns": temporal,
         "category_distribution": cat_stats.head(30).to_dict(orient="records") if cat_stats is not None else None,
         "outliers": outliers,
+        "outlier_removal_basis": {
+            "basis": outlier_ranking["basis"],
+            "mode": outlier_ranking["mode"],
+            "score_label": outlier_ranking["score_label"],
+            "ranked_users_preview": [
+                {
+                    "rank": i + 1,
+                    "user_id": str(uid),
+                    "score": round(float(outlier_ranking["score_series"].iloc[i]), 4),
+                }
+                for i, uid in enumerate(outlier_ranking["score_series"].index[:10])
+            ],
+        },
         "composite_outlier_analysis": composite_suggestion,
     }
 
@@ -942,6 +1103,9 @@ def main():
     plot_category_distribution(cat_stats, output_dir)
     plot_temporal_patterns(impressions_df, output_dir)
     plot_outlier_boxplots(user_stats, output_dir)
+    plot_total_impressions_boxplots_by_removal(
+        user_stats, outlier_ranking["ranked_user_ids"], output_dir
+    )
     plot_outlier_scatter(user_stats, output_dir)
     if not composite_scores.empty and composite_suggestion:
         plot_removal_curve(composite_scores, composite_suggestion, output_dir)

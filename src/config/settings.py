@@ -62,8 +62,11 @@ class ClusteringConfig:
         legacy_features: If True, use the legacy feature set (disables per-category
                          proportions and time-of-day features, enables session behavior
                          features like avg_category_switches and avg_session_duration)
-        remove_top: Number of top outlier users (by L2 norm in scaled feature space)
-                    to remove before clustering
+        remove_top: Number of top outlier users to remove before clustering
+        outlier_removal_basis: Basis used to rank users for remove_top.
+                               'composite_score' uses L2 norm in scaled
+                               feature space (default); any numeric feature
+                               name in user features can be used instead.
         n_init: Number of KMeans initializations
         use_minibatch: Whether to use MiniBatchKMeans for final clustering
         minibatch_threshold: Auto-enable MiniBatch when samples exceed threshold
@@ -95,6 +98,7 @@ class ClusteringConfig:
     k_selection_method: str = "elbow"
     legacy_features: bool = False
     remove_top: int = 0
+    outlier_removal_basis: str = "composite_score"
     n_init: int = 10
     use_minibatch: bool = False
     minibatch_threshold: int = 50000

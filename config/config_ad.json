@@ -1,39 +1,48 @@
 {
-    "dataset": {
-      "name": "ad",
-      "input_path": "s3://recosearch-nps-bucket-shared-with-smit/ad",
-      "format": "spark_csv",
-      "event_types": ["home_page_view", "article_page_view"],
-      "start_time_min": "2026-01-05T19:19:58.665Z",
-      "start_time_max": "2026-01-12T19:19:58.665Z"
-    },
-    "clustering": {
-      "k_selection_method": "elbow",
-      "legacy_features": true,
-      "remove_top": 1
-    },
-    "evaluation": {
-      "enabled": false,
-      "k_values": [10, 20, 50],
-      "content_mode": "embeddings",
-      "train_on_full_dataset": true,
-      "n_most_recent_in": 30,
-      "algorithms": [
-        {"name": "Popularity", "enabled": true},
-        {
-          "name": "ItemKNN",
-          "enabled": true,
-          "grid": {
-            "K": [50, 100, 200],
-            "normalize_sim": [true, false],
-            "normalize_X": [true, false]
-          }
-        },
-        { "name": "EASE", "enabled": false, "grid": { "l2": [1, 10, 100, 1000] } },
-        {"name": "MultVAE", "enabled": true, "params": {
+  "dataset": {
+    "name": "ad",
+    "input_path": "s3://recosearch-nps-bucket-shared-with-smit/ad",
+    "format": "spark_csv",
+    "event_types": ["home_page_view", "article_page_view"],
+    "start_time_min": "2026-01-05T19:19:58.665Z",
+    "start_time_max": "2026-01-12T19:19:58.665Z"
+  },
+  "clustering": {
+    "k_selection_method": "elbow",
+    "legacy_features": true,
+    "remove_top": 3,
+    "outlier_removal_basis": "count_total_impressions"
+  },
+  "evaluation": {
+    "enabled": false,
+    "k_values": [10, 20, 50],
+    "content_mode": "embeddings",
+    "train_on_full_dataset": true,
+    "n_most_recent_in": 30,
+    "algorithms": [
+      { "name": "Popularity", "enabled": true },
+      {
+        "name": "ItemKNN",
+        "enabled": true,
+        "grid": {
+          "K": [50, 100, 200],
+          "normalize_sim": [true, false],
+          "normalize_X": [true, false]
+        }
+      },
+      {
+        "name": "EASE",
+        "enabled": false,
+        "grid": { "l2": [1, 10, 100, 1000] }
+      },
+      {
+        "name": "MultVAE",
+        "enabled": true,
+        "params": {
           "max_epochs": 20
-        }},
-        {"name": "CB-ST", "enabled": true}
-      ]
-    }
+        }
+      },
+      { "name": "CB-ST", "enabled": true }
+    ]
   }
+}

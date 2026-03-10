@@ -250,16 +250,46 @@ def run_clustering(
     logger.info(
         f"Extracted {len(extractor.get_feature_names())} features for {len(features_df)} users")
 
-    # Optional: filter out top N outliers (by L2 norm in scaled space).
+    # Optional: filter out top N outliers.
     X = extractor.get_feature_matrix(features_df)
     remove_top = config.clustering.remove_top
+    outlier_removal_basis = getattr(
+        config.clustering, "outlier_removal_basis", "composite_score"
+    )
     removed_outliers_summary = []
     if remove_top > 0:
         # Keep at least 3 users for clustering
         n_outliers = min(remove_top, len(features_df) - 3)
         if n_outliers > 0:
-            outlier_scores = np.linalg.norm(X, axis=1)
-            outlier_idx = np.argsort(outlier_scores)[-n_outliers:]
+            if outlier_removal_basis == "composite_score":
+                outlier_scores = np.linalg.norm(X, axis=1)
+                outlier_idx = np.argsort(outlier_scores)[-n_outliers:]
+            else:
+                if outlier_removal_basis not in features_df.columns:
+                    available_features = [
+                        c for c in features_df.columns
+                        if c != "user_id" and pd.api.types.is_numeric_dtype(features_df[c])
+                    ]
+                    raise ValueError(
+                        f"clustering.outlier_removal_basis='{outlier_removal_basis}' not found "
+                        f"in extracted user features. Available numeric features: {available_features}"
+                    )
+                if outlier_removal_basis == "user_id":
+                    raise ValueError(
+                        "clustering.outlier_removal_basis='user_id' is not valid. "
+                        "Use 'composite_score' or a numeric feature column."
+                    )
+                if not pd.api.types.is_numeric_dtype(features_df[outlier_removal_basis]):
+                    raise ValueError(
+                        f"clustering.outlier_removal_basis='{outlier_removal_basis}' must be numeric."
+                    )
+                basis_values = pd.to_numeric(features_df[outlier_removal_basis], errors="coerce")
+                if basis_values.notna().sum() == 0:
+                    raise ValueError(
+                        f"clustering.outlier_removal_basis='{outlier_removal_basis}' has no non-null numeric values."
+                    )
+                outlier_idx = basis_values.fillna(float("-inf")).nlargest(n_outliers).index.to_numpy()
+
             outlier_user_ids = features_df.iloc[outlier_idx]["user_id"].tolist(
             )
 
@@ -286,7 +316,8 @@ def run_clustering(
             features_df = features_df[mask].reset_index(drop=True)
             X = extractor.get_feature_matrix(features_df)
             logger.info(
-                f"Filtered out top {n_outliers} outlier(s): {outlier_user_ids}")
+                f"Filtered out top {n_outliers} outlier(s) using basis '{outlier_removal_basis}': {outlier_user_ids}"
+            )
         else:
             logger.info(
                 f"Skipping outlier removal (--remove-top={remove_top}) because too few users are available"
@@ -657,7 +688,7 @@ def parse_args():
         "--remove-top",
         type=int,
         default=None,
-        help="Remove top N outlier users by L2 norm in scaled feature space before clustering (overrides clustering.remove_top)",
+        help="Remove top N outlier users before clustering (ranking basis is controlled by clustering.outlier_removal_basis)",
     )
 
     parser.add_argument(
@@ -809,6 +840,9 @@ def load_or_create_config(args) -> PipelineConfig:
 
     if config.clustering.remove_top < 0:
         raise ValueError("clustering.remove_top must be >= 0")
+    if not isinstance(config.clustering.outlier_removal_basis, str) or not config.clustering.outlier_removal_basis.strip():
+        raise ValueError("clustering.outlier_removal_basis must be a non-empty string")
+    config.clustering.outlier_removal_basis = config.clustering.outlier_removal_basis.strip()
 
     return config
 

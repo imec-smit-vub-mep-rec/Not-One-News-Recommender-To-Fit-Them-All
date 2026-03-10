@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import time
 from pathlib import Path
@@ -325,9 +326,152 @@ def _build_scaler_variants(X_raw: np.ndarray) -> Dict[str, np.ndarray]:
     return variants
 
 
+def _safe_feature_filename(feature_name: str) -> str:
+    """Convert feature name to a filesystem-safe slug."""
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "_", feature_name).strip("_")
+    return slug or "feature"
+
+
+def _plot_unscaled_feature_distributions_by_cluster(
+    features_unscaled: pd.DataFrame,
+    cluster_df: pd.DataFrame,
+    viz_dir: Path,
+) -> Dict[str, Any]:
+    """
+    Plot unscaled feature distributions by cluster.
+
+    For each feature, generate step histograms where:
+      - x-axis: feature value
+      - y-axis: number of users
+      - color: cluster_id
+
+    Exports both:
+      - linear y-axis plots
+      - log y-axis plots
+    """
+    if not {"user_id", "cluster_id"}.issubset(cluster_df.columns):
+        raise ValueError("`user_id`/`cluster_id` missing in cluster dataframe")
+
+    merged = features_unscaled.merge(
+        cluster_df[["user_id", "cluster_id"]],
+        on="user_id",
+        how="inner",
+    )
+    if merged.empty:
+        raise ValueError(
+            "No overlapping users between unscaled features and cluster assignments"
+        )
+
+    feature_cols = [c for c in merged.columns if c not in {"user_id", "cluster_id"}]
+    cluster_ids = sorted(merged["cluster_id"].dropna().unique().tolist())
+    cmap = plt.get_cmap("tab10")
+    out_root = ensure_dir(viz_dir / "feature_distributions_by_cluster")
+    out_linear = ensure_dir(out_root / "linear")
+    out_log = ensure_dir(out_root / "log")
+
+    linear_plot_paths: List[str] = []
+    log_plot_paths: List[str] = []
+    skipped_features: List[str] = []
+    for feature in feature_cols:
+        raw_vals = pd.to_numeric(merged[feature], errors="coerce")
+        valid_mask = raw_vals.notna() & np.isfinite(raw_vals.to_numpy())
+        if not valid_mask.any():
+            skipped_features.append(feature)
+            continue
+
+        plot_df = merged.loc[valid_mask, ["cluster_id"]].copy()
+        plot_df[feature] = raw_vals.loc[valid_mask].astype(float).to_numpy()
+
+        lo, hi = plot_df[feature].quantile([0.005, 0.995])
+        if pd.isna(lo) or pd.isna(hi):
+            skipped_features.append(feature)
+            continue
+        if hi <= lo:
+            lo, hi = float(plot_df[feature].min()), float(plot_df[feature].max())
+        if hi <= lo:
+            skipped_features.append(feature)
+            continue
+
+        clipped_vals = plot_df[feature].clip(lower=float(lo), upper=float(hi))
+        bins = np.histogram_bin_edges(clipped_vals.to_numpy(), bins=40)
+
+        safe_name = _safe_feature_filename(feature)
+
+        fig_lin, ax_lin = plt.subplots(figsize=(8, 6))
+        fig_log, ax_log = plt.subplots(figsize=(8, 6))
+        for idx, cluster_id in enumerate(cluster_ids):
+            cluster_vals = clipped_vals[plot_df["cluster_id"] == cluster_id]
+            if cluster_vals.empty:
+                continue
+            vals = cluster_vals.to_numpy()
+            color = cmap(idx % 10)
+            label = f"Cluster {cluster_id}"
+            ax_lin.hist(
+                vals,
+                bins=bins,
+                histtype="stepfilled",
+                linewidth=0.0,
+                color=color,
+                alpha=0.35,
+                edgecolor="none",
+                density=True,
+                label=label,
+            )
+            ax_log.hist(
+                vals,
+                bins=bins,
+                histtype="stepfilled",
+                linewidth=0.0,
+                color=color,
+                alpha=0.35,
+                edgecolor="none",
+                density=True,
+                label=label,
+                log=True,
+            )
+
+        ax_lin.set_xlabel(feature)
+        ax_lin.set_ylabel("User density")
+        ax_lin.set_title(f"Unscaled `{feature}` density by cluster (linear)")
+        ax_lin.grid(True, axis="y", alpha=0.25)
+        ax_lin.legend(loc="best", fontsize=8)
+        for spine in ax_lin.spines.values():
+            spine.set_visible(False)
+        fig_lin.tight_layout()
+
+        ax_log.set_xlabel(feature)
+        ax_log.set_ylabel("User density (log scale)")
+        ax_log.set_title(f"Unscaled `{feature}` density by cluster (log y)")
+        ax_log.grid(True, axis="y", alpha=0.25)
+        ax_log.legend(loc="best", fontsize=8)
+        for spine in ax_log.spines.values():
+            spine.set_visible(False)
+        fig_log.tight_layout()
+
+        linear_out_path = out_linear / f"{safe_name}_by_cluster.png"
+        log_out_path = out_log / f"{safe_name}_by_cluster.png"
+        fig_lin.savefig(linear_out_path, dpi=150, bbox_inches="tight")
+        fig_log.savefig(log_out_path, dpi=150, bbox_inches="tight")
+        plt.close(fig_lin)
+        plt.close(fig_log)
+        linear_plot_paths.append(str(linear_out_path))
+        log_plot_paths.append(str(log_out_path))
+
+    return {
+        "n_feature_plots": int(len(linear_plot_paths)),
+        "linear_plot_paths": linear_plot_paths,
+        "log_plot_paths": log_plot_paths,
+        "skipped_features": skipped_features,
+        "output_dir": str(out_root),
+        "linear_output_dir": str(out_linear),
+        "log_output_dir": str(out_log),
+    }
+
+
 def run_part_b(
     impressions_df: pd.DataFrame,
     articles_df: Optional[pd.DataFrame],
+    cluster_df: pd.DataFrame,
     n_clusters: int,
     legacy_mode: bool,
     viz_dir: Path,
@@ -369,6 +513,12 @@ def run_part_b(
     dist_plot = viz_dir / "feature_distributions.png"
     plt.savefig(dist_plot, dpi=150, bbox_inches="tight")
     plt.close(fig)
+
+    cluster_dist_results = _plot_unscaled_feature_distributions_by_cluster(
+        features_unscaled=features_unscaled,
+        cluster_df=cluster_df,
+        viz_dir=viz_dir,
+    )
 
     variants = _build_scaler_variants(X_raw)
     scaler_records: List[Dict[str, Any]] = []
@@ -420,6 +570,7 @@ def run_part_b(
         "feature_columns": feature_cols,
         "scaler_results": scaler_records,
         "distribution_plot_path": str(dist_plot),
+        "cluster_distribution_plots": cluster_dist_results,
         "scaler_plot_path": str(scaler_plot),
     }
 
@@ -648,6 +799,7 @@ def main() -> None:
         results["part_b"] = run_part_b(
             impressions_df=impressions_df,
             articles_df=articles_df,
+            cluster_df=cluster_df,
             n_clusters=n_clusters,
             legacy_mode=legacy_mode,
             viz_dir=viz_dir,

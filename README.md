@@ -406,6 +406,9 @@ Generates a dataset overview **before** running the pipeline: descriptive statis
 # From config (runs conversion automatically)
 python scripts/run_dataset_description.py --config config/config_ebnerd_small.json
 
+# Feature-specific outlier ranking (instead of default composite score)
+python scripts/run_dataset_description.py --config config/config_ebnerd_small.json --outlier-removal-basis total_impressions
+
 # From dataset preset
 python scripts/run_dataset_description.py --dataset ebnerd --input-dir data/ebnerd/ebnerd_small
 
@@ -416,7 +419,7 @@ python scripts/run_dataset_description.py --data-dir runs/ebnerd_20260302_142823
 python scripts/run_dataset_description.py --data-dir runs/ebnerd_20260302_142823/data -o reports/ebnerd
 ```
 
-**Outputs:** `dataset_description.json`, console report, and visualizations (impressions/sessions/reading-time distributions, category bar chart, temporal patterns, outlier boxplots and scatter, composite score removal curve). The **composite outlier analysis** ranks users by L2 norm of z-scores and suggests `--remove-top` using gap ratios in the score curve.
+**Outputs:** `dataset_description.json`, console report, and visualizations (impressions/sessions/reading-time distributions, category bar chart, temporal patterns, outlier boxplots and scatter, `total_impressions_boxplots_by_removal.png` for removal levels `n=0..5`, composite score removal curve). The default **composite outlier analysis** ranks users by L2 norm of z-scores and suggests `--remove-top` using gap ratios in the score curve; `--outlier-removal-basis` lets you switch to a feature-based ranking for removal analysis plots.
 
 ---
 
