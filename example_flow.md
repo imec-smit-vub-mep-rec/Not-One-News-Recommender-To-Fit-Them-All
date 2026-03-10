@@ -8,7 +8,7 @@ python scripts/generate_embeddings.py --input-dir data/ebnerd/ebnerd_small --mod
 python scripts/run_dataset_description.py --config config/config_ebnerd_small.json
 python scripts/run_dataset_description.py --config config/config_hln.json
 # Optional: feature-based outlier-removal ranking for boxplots (n=0..5)
-python scripts/run_dataset_description.py --config config/config_ebnerd_small.json --outlier-removal-basis total_impressions
+python scripts/run_dataset_description.py --config config/config_ad.json --outlier-removal-basis total_impressions
 
 python scripts/run_dataset_description.py --config config/config_ebnerd_small.json --outlier-removal-basis total_impressions
 
