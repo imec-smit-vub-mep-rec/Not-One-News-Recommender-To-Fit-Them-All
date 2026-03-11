@@ -43,7 +43,7 @@ flowchart TB
 
 **Preprocessing details:**
 - **Validation** – Check articles and impressions against expected schema (required columns, types, duplicates)
-- **Cleaning** – Remove duplicate impressions; filter out bot-like sessions (>50 impressions/session); normalize category strings (strip, lowercase)
+- **Cleaning** – Remove duplicate impressions; filter out bot-like sessions (>50 article impressions/session); normalize category strings (strip, lowercase)
 - **Clustering data** – Keep all users and homepage views (no user filtering); homepage behavior is a clustering signal
 - **interactions.csv** – Extract article-only rows (user_id, article_id, impression_time) for RecPack evaluation
 - **articles_content.csv** – Combine category + title (or + body in full mode) for CB-ST; skipped in embeddings-only mode
